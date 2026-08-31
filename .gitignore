@@ -1,0 +1,16 @@
+# JS/TS
+node_modules/
+dist/
+*.local
+
+# Python (apps/api)
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Env & editor
+.env
+.env.*
+.DS_Store
