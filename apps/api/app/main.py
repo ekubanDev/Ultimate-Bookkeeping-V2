@@ -7,13 +7,15 @@ from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 
 from app.errors import AppError
-from app.routers import sales
+from app.routers import expenses, sales, stock
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Ultimate Bookkeeping API", version="0.1.0")
 
     app.include_router(sales.router)
+    app.include_router(stock.router)
+    app.include_router(expenses.router)
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:

@@ -22,12 +22,14 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -84,7 +86,38 @@ class StockLevel(Base):
 
 
 class StockMovement(Base):
+    """Append-only stock ledger (design.md §2.5).
+
+    Idempotency note (resolved ambiguity, POST /api/v1/stock/adjustments):
+    `client_id` is the idempotency anchor for offline-originated movements,
+    but it is NOT globally unique across this table — a single sale with N
+    line items inserts N stock_movements rows that all share the *sale's*
+    client_id (see routers/sales.py). A plain `UNIQUE(client_id)` constraint
+    would therefore break multi-line-item sales.
+
+    Movements created via POST /api/v1/stock/adjustments (reason in
+    'restock'/'adjustment'; 'sale' and 'transfer' are never accepted from
+    that endpoint — 'sale' is written exclusively by the sales endpoint,
+    'transfer' is reserved for a future admin-console flow) always insert
+    exactly one row per client_id, so we can safely enforce uniqueness
+    scoped to `reason <> 'sale'` — a partial/conditional unique index rather
+    than a table-wide unique constraint. This also means an adjustment's
+    idempotency lookup must filter `reason != 'sale'` so it can never
+    coincidentally match a sale-driven row that happens to carry the same
+    client_id value (astronomically unlikely with UUIDs, but the lookup is
+    scoped defensively regardless — see routers/stock.py `_fetch_movement_by_client_id`).
+    """
+
     __tablename__ = "stock_movements"
+    __table_args__ = (
+        Index(
+            "uq_stock_movements_client_id_non_sale",
+            "client_id",
+            unique=True,
+            postgresql_where=text("reason <> 'sale' AND client_id IS NOT NULL"),
+            sqlite_where=text("reason <> 'sale' AND client_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     product_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("products.id"), nullable=False)
@@ -136,3 +169,28 @@ class SaleLineItem(Base):
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
 
     sale: Mapped["Sale"] = relationship(back_populates="line_items")
+
+
+class Expense(Base):
+    """design.md §2.8 — follows the `sales` append-only-ledger template:
+    id, outlet_id, client_id UNIQUE, amount, status, created_by, created_at,
+    plus expense-specific columns (category, note, device_recorded_at).
+    """
+
+    __tablename__ = "expenses"
+    __table_args__ = (CheckConstraint("amount >= 0", name="ck_expenses_amount_nonneg"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    outlet_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("outlets.id"), nullable=False)
+    client_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        Enum("recorded", "voided", name="expense_status", native_enum=False),
+        nullable=False,
+        default="recorded",
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    device_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

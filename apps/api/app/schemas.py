@@ -12,6 +12,7 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -76,6 +77,82 @@ class SaleResponse(BaseModel):
     client_id: str
     status: str
     total_amount: str
+    created_at: datetime
+    idempotent_replay: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StockAdjustmentRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    client_id: str = Field(min_length=1)
+    product_id: uuid.UUID
+    outlet_id: uuid.UUID
+    # `reason` is restricted to the two offline-eligible reasons this endpoint
+    # accepts (api-contracts.md §3 header: "offline-eligible for
+    # adjustments/restocks"). 'sale' is written exclusively by the sales
+    # endpoint; 'transfer' isn't part of this MVP surface.
+    reason: Literal["restock", "adjustment"]
+    delta: int
+
+    @field_validator("delta")
+    @classmethod
+    def _validate_delta_nonzero(cls, value: int) -> int:
+        if value == 0:
+            raise ValueError("delta must be a non-zero integer")
+        return value
+
+
+class StockAdjustmentResponse(BaseModel):
+    id: uuid.UUID
+    client_id: str
+    # Mirrors the sales response envelope shape (id, client_id, status,
+    # created_at, idempotent_replay) for uniform client-side offline-queue
+    # handling, plus `quantity` — the resulting stock_levels.quantity per
+    # api-contracts.md §3. stock_movements rows have no natural "status" of
+    # their own; "recorded" is used as the fixed value so the envelope shape
+    # stays consistent across all offline-eligible endpoints.
+    status: str
+    quantity: int
+    created_at: datetime
+    idempotent_replay: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StockLevelResponse(BaseModel):
+    product_id: uuid.UUID
+    product_name: str
+    sku: str | None
+    quantity: int
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ExpenseCreateRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    client_id: str = Field(min_length=1)
+    outlet_id: uuid.UUID
+    amount: str
+    category: str = Field(min_length=1)
+    note: str | None = None
+    device_recorded_at: datetime | None = None
+
+    _validate_amount = field_validator("amount")(validate_money_string)
+
+    @property
+    def amount_decimal(self) -> Decimal:
+        return Decimal(self.amount)
+
+
+class ExpenseResponse(BaseModel):
+    id: uuid.UUID
+    client_id: str
+    status: str
+    amount: str
     created_at: datetime
     idempotent_replay: bool
 
