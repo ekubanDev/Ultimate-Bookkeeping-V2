@@ -49,11 +49,11 @@ export function useSubmitSale() {
     setError(null);
 
     try {
-      // TODO(offline-queue): enqueue() is currently a stub — once
-      // implemented it should resolve with the QueueEntry (status
-      // 'queued'|'synced'|'failed') per the design doc §3 contract.
+      // enqueue() persists write-first and returns fast (design doc §3.2) —
+      // its `state` is almost always 'queued' here since dispatch happens
+      // in the background; 'syncing' collapses to the same UI status.
       const entry = await enqueue(intent);
-      setStatus(entry?.status ?? "queued");
+      setStatus(entry?.state === "syncing" ? "queued" : entry?.state ?? "queued");
       return entry;
     } catch (err) {
       setStatus("failed");

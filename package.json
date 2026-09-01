@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "dev:outlet": "npm run dev --workspace=apps/outlet",
-    "build:outlet": "npm run build --workspace=apps/outlet"
+    "build:outlet": "npm run build --workspace=apps/outlet",
+    "test:offline-queue": "npm run test --workspace=packages/offline-queue"
   }
 }

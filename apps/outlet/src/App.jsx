@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { onReconnect } from "@ub/offline-queue";
 import OutletNav from "./navigation/OutletNav.jsx";
 import PosScreen from "./features/pos/PosScreen.jsx";
 import StockScreen from "./features/stock/StockScreen.jsx";
@@ -9,16 +11,19 @@ import SyncBanner from "./features/sync-status/SyncBanner.jsx";
  * App — top-level shell for the Outlet app.
  *
  * Owns: route wiring between the four screens (POS / Stock / Expenses /
- * Sync), and mounting the persistent SyncBanner + OutletNav chrome around
- * whichever screen is active.
+ * Sync), mounting the persistent SyncBanner + OutletNav chrome around
+ * whichever screen is active, and initializing offline-queue's
+ * onReconnect() listener once at startup.
  *
  * Does NOT own: any screen's internal state or API calls — those live in
- * each feature folder. Does NOT own: registering the offline-queue
- * reconnect listener's business logic — that belongs to
- * /packages/offline-queue, though App.jsx is where it gets initialized
- * once at startup (TODO, once offline-queue.onReconnect has a real body).
+ * each feature folder. Does NOT own: the offline-queue reconnect listener's
+ * business logic — that belongs to /packages/offline-queue; App.jsx just
+ * calls onReconnect() once so the 'online' -> flush() wiring is live for
+ * the whole app session.
  */
 export default function App() {
+  useEffect(() => onReconnect(), []);
+
   return (
     <BrowserRouter>
       <SyncBanner />

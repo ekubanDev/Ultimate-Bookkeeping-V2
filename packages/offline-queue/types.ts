@@ -18,18 +18,65 @@ export interface Intent<TPayload = unknown> {
   payload: TPayload;
 }
 
-/** Local queue-entry lifecycle state, surfaced to useSubmit* hooks as `status`. */
-export type QueueEntryStatus = "idle" | "queued" | "synced" | "failed";
+/**
+ * Local queue-entry lifecycle state, persisted in IndexedDB and surfaced to
+ * useSyncStatus/SyncBanner.
+ *
+ *  - queued:    persisted, waiting for (or between retries of) dispatch.
+ *  - syncing:   a dispatch attempt is in flight right now.
+ *  - synced:    server accepted the write — either a fresh insert or an
+ *               idempotent replay (design doc §3.4 treats both as success).
+ *  - failed:    server returned a non-retryable rejection (design doc §3.4)
+ *               — needs human resolution via retryEntry()/discardEntry().
+ *  - discarded: user explicitly abandoned a failed entry. Kept for audit
+ *               (never hard-deleted) but excluded from dispatch/flush.
+ */
+export type QueueEntryState =
+  | "queued"
+  | "syncing"
+  | "synced"
+  | "failed"
+  | "discarded";
 
-export interface QueueEntry<TPayload = unknown> {
-  intent: Intent<TPayload>;
-  status: QueueEntryStatus;
-  /** Increments on each retry attempt; used for backoff scheduling. */
-  attempts: number;
-  /** Set only when status === 'failed' and the server rejection was non-retryable. */
-  lastError?: {
-    code: string;
-    message: string;
-    retryable: boolean;
-  };
+/** Structured rejection stored on an entry, mirrors the api-contracts.md §1 error envelope. */
+export interface QueueEntryError {
+  code: string;
+  message: string;
+  retryable: boolean;
 }
+
+/**
+ * A persisted queue entry — the unit of work stored in IndexedDB, keyed by
+ * `client_id`. `client_id` is generated once by the caller (see
+ * idempotency.js) and never regenerated here, including across retries.
+ */
+export interface QueueEntry<TPayload = unknown> {
+  client_id: string;
+  type: IntentType;
+  payload: TPayload;
+  state: QueueEntryState;
+  /** Number of dispatch attempts made so far (0 before the first attempt completes). */
+  attempts: number;
+  /** Set on the most recent failed/retried attempt; cleared on success. */
+  last_error: QueueEntryError | null;
+  /** epoch ms — when this intent was first persisted. Drives FIFO replay order. */
+  enqueued_at: number;
+  /** epoch ms — set once state becomes 'synced'. */
+  synced_at: number | null;
+  /**
+   * Monotonic tiebreaker for FIFO ordering when two entries share the same
+   * `enqueued_at` millisecond (rapid-fire POS entry on a fast device).
+   * Internal to this package — not part of the design doc's entry shape but
+   * doesn't change it, just makes FIFO deterministic.
+   */
+  seq: number;
+}
+
+/** Aggregate view used by useSyncStatus to drive SyncBanner without polling. */
+export interface QueueSnapshot {
+  counts: Record<QueueEntryState, number>;
+  entries: QueueEntry[];
+}
+
+/** Listener signature for subscribe() — called with the full snapshot on every state transition. */
+export type QueueSnapshotListener = (snapshot: QueueSnapshot) => void;

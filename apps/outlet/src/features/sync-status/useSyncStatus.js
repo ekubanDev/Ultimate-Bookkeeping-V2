@@ -1,53 +1,55 @@
 import { useEffect, useState } from "react";
-import { getQueueSnapshot, onReconnect } from "@ub/offline-queue";
+import { getQueueSnapshot, subscribe } from "@ub/offline-queue";
+
+const EMPTY_SNAPSHOT = {
+  counts: { queued: 0, syncing: 0, synced: 0, failed: 0, discarded: 0 },
+  entries: [],
+};
 
 /**
  * useSyncStatus — reads the global offline-queue status for SyncBanner.
  *
- * Owns: subscribing to queue snapshot/updates and deriving the aggregate
- * counts SyncBanner renders ("N syncing" / "sync failed").
+ * Owns: subscribing to queue snapshot/updates (via offline-queue's
+ * subscribe()) and deriving the aggregate counts SyncBanner renders
+ * ("N syncing" / "sync failed"). No polling — subscribe() pushes a fresh
+ * snapshot on every state transition.
  * Does NOT own: retrying or resolving failed entries — that's a user
  * action routed back through offline-queue directly (per
- * ultimate-bookkeeping-v2-outlet-ui-plan.md §3).
+ * ultimate-bookkeeping-v2-outlet-ui-plan.md §3). Does NOT own: wiring the
+ * 'online' reconnect listener — offline-queue.onReconnect() is initialized
+ * once at app startup, in App.jsx.
  */
 export function useSyncStatus() {
-  const [entries, setEntries] = useState(/** @type {import('@ub/offline-queue/types').QueueEntry[]} */ ([]));
+  const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [loadError, setLoadError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
 
     getQueueSnapshot()
-      .then((snapshot) => {
-        if (!cancelled) setEntries(snapshot);
+      .then((snap) => {
+        if (!cancelled) setSnapshot(snap);
       })
       .catch((err) => {
-        // TODO(offline-queue): getQueueSnapshot() is currently a stub — this
-        // catch keeps the scaffold from crashing until it's implemented.
         if (!cancelled) setLoadError(err);
       });
 
-    // TODO(offline-queue): onReconnect() is currently a stub — once
-    // implemented it should invoke the callback below on every queue
-    // status change, not just on reconnect.
-    const unsubscribe = onReconnect?.((updatedEntry) => {
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.intent.client_id === updatedEntry.intent.client_id
-            ? updatedEntry
-            : e
-        )
-      );
+    const unsubscribe = subscribe((snap) => {
+      if (!cancelled) setSnapshot(snap);
     });
 
     return () => {
       cancelled = true;
-      if (typeof unsubscribe === "function") unsubscribe();
+      unsubscribe();
     };
   }, []);
 
-  const queuedCount = entries.filter((e) => e.status === "queued").length;
-  const failedEntries = entries.filter((e) => e.status === "failed");
+  const entries = snapshot.entries;
+  // "Syncing" from the cashier's perspective covers both 'queued' (waiting
+  // for/between attempts) and 'syncing' (attempt in flight) — both mean
+  // "not yet confirmed, don't worry the user yet".
+  const queuedCount = (snapshot.counts.queued ?? 0) + (snapshot.counts.syncing ?? 0);
+  const failedEntries = entries.filter((e) => e.state === "failed");
 
   return {
     entries,
