@@ -3,6 +3,7 @@ import { useAuth } from "../../auth/AuthContext.jsx";
 import StockLevelList from "./StockLevelList.jsx";
 import AdjustmentModal from "./AdjustmentModal.jsx";
 import { useSubmitAdjustment } from "./useSubmitAdjustment.js";
+import { useStockLevels } from "./useStockLevels.js";
 
 /**
  * StockScreen — top-level stock screen.
@@ -10,16 +11,14 @@ import { useSubmitAdjustment } from "./useSubmitAdjustment.js";
  * Owns: layout and screen-level state (which product's adjustment modal is
  * open, the current outlet_id — read from the signed-in manager's /me
  * profile, per api-contracts.md §1).
- * Does NOT own: fetching stock levels (TODO: useStockLevels, not in this
- * scaffold's file list yet) or submission (delegates to
- * useSubmitAdjustment).
+ * Does NOT own: fetching stock levels (delegates to useStockLevels) or
+ * submission (delegates to useSubmitAdjustment).
  */
 export default function StockScreen() {
   const { profile } = useAuth();
   const [adjustingProduct, setAdjustingProduct] = useState(null);
-  // TODO: replace with real GET /stock/levels fetch (out of scope for scaffold).
-  const [levels] = useState([]);
   const { submitAdjustment, status } = useSubmitAdjustment();
+  const { levels, loading, error, refetch } = useStockLevels(profile?.outlet_id);
 
   // Admin accounts have no outlet_id — this app is for outlet managers only
   // (the admin console at /apps/admin is where cross-outlet views live, per
@@ -34,19 +33,34 @@ export default function StockScreen() {
     );
   }
 
-  const handleConfirm = async (delta) => {
+  const handleConfirm = async ({ delta, reason }) => {
     if (!adjustingProduct) return;
-    await submitAdjustment({
-      productId: adjustingProduct.product_id,
-      outletId: profile.outlet_id,
-      delta,
-    });
-    setAdjustingProduct(null);
+    try {
+      await submitAdjustment({
+        productId: adjustingProduct.product_id,
+        outletId: profile.outlet_id,
+        delta,
+        reason,
+      });
+      // enqueue() resolving is durable success — close the modal and refresh
+      // the displayed quantities so the manager sees the updated stock.
+      setAdjustingProduct(null);
+      refetch();
+    } catch {
+      // submitAdjustment set status to 'failed'; keep modal open so the
+      // manager can see the failure state (status prop on AdjustmentModal).
+    }
   };
 
   return (
     <section className="ub-stock-screen">
       <h1>Stock</h1>
+      {loading && <p className="ub-stock-screen__loading">Loading stock levels...</p>}
+      {error && (
+        <p className="ub-stock-screen__error">
+          Could not load stock levels. Check your connection and try again.
+        </p>
+      )}
       <StockLevelList levels={levels} onAdjust={setAdjustingProduct} />
       <AdjustmentModal
         isOpen={Boolean(adjustingProduct)}
