@@ -3,6 +3,47 @@ import { generateClientId } from "@ub/offline-queue/idempotency.js";
 import { enqueue } from "@ub/offline-queue";
 
 /**
+ * buildSaleIntent — pure builder for the offline-queue Intent wrapping a
+ * SaleRequest. Per tesseract-fp-guide.md §2/§4: no `Date.now()`/
+ * `generateClientId()` calls inside — `deviceRecordedAt` and `clientId` are
+ * inputs, generated at the edge (in submitSale below) and passed in. Given
+ * the same arguments this always returns the same intent, so it's directly
+ * unit-testable without touching IndexedDB or the clock.
+ *
+ * @param {Array<{ product_id: string, quantity: number, unit_price: string }>} lineItems
+ * @param {{
+ *   outletId: string,
+ *   paymentMethod: string,
+ *   discountAmount?: string,
+ *   taxAmount?: string,
+ *   deviceRecordedAt: string,
+ *   clientId: string,
+ * }} params
+ * @returns {{ client_id: string, type: 'sale', payload: import('@ub/shared-types').SaleRequest }}
+ */
+export function buildSaleIntent(
+  lineItems,
+  { outletId, paymentMethod, discountAmount = "0.00", taxAmount = "0.00", deviceRecordedAt, clientId }
+) {
+  /** @type {import('@ub/shared-types').SaleRequest} */
+  const payload = {
+    client_id: clientId,
+    outlet_id: outletId,
+    line_items: lineItems,
+    payment_method: paymentMethod,
+    discount_amount: discountAmount,
+    tax_amount: taxAmount,
+    device_recorded_at: deviceRecordedAt,
+  };
+
+  return {
+    client_id: clientId,
+    type: "sale",
+    payload,
+  };
+}
+
+/**
  * useSubmitSale — builds the sale intent and hands it to the shared
  * offline-queue. Per ultimate-bookkeeping-v2-outlet-ui-plan.md §3: owns
  * building the `intent` object and exposing submission `status`. Does NOT
@@ -24,26 +65,22 @@ export function useSubmitSale() {
    * }} params
    */
   const submitSale = useCallback(async (params) => {
-    // client_id is generated exactly once here, at intent creation — never
-    // regenerated if this same intent is retried by the offline-queue.
+    // client_id and device_recorded_at are the two "edge" effects
+    // (tesseract-fp-guide.md §2) — generated exactly once here, at intent
+    // creation, then handed to the pure buildSaleIntent() as plain inputs.
+    // client_id is never regenerated if this same intent is retried by the
+    // offline-queue.
     const clientId = generateClientId();
+    const deviceRecordedAt = new Date().toISOString();
 
-    /** @type {import('@ub/shared-types').SaleRequest} */
-    const payload = {
-      client_id: clientId,
-      outlet_id: params.outletId,
-      line_items: params.lineItems,
-      payment_method: params.paymentMethod,
-      discount_amount: params.discountAmount ?? "0.00",
-      tax_amount: params.taxAmount ?? "0.00",
-      device_recorded_at: new Date().toISOString(),
-    };
-
-    const intent = {
-      client_id: clientId,
-      type: "sale",
-      payload,
-    };
+    const intent = buildSaleIntent(params.lineItems, {
+      outletId: params.outletId,
+      paymentMethod: params.paymentMethod,
+      discountAmount: params.discountAmount,
+      taxAmount: params.taxAmount,
+      deviceRecordedAt,
+      clientId,
+    });
 
     setStatus("queued");
     setError(null);

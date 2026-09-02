@@ -3,6 +3,41 @@ import { generateClientId } from "@ub/offline-queue/idempotency.js";
 import { enqueue } from "@ub/offline-queue";
 
 /**
+ * buildExpenseIntent — pure builder for the offline-queue Intent wrapping
+ * an ExpenseRequest. Per tesseract-fp-guide.md §2/§4: no
+ * `Date.now()`/`generateClientId()` calls inside — `deviceRecordedAt` and
+ * `clientId` are inputs, generated at the edge (in submitExpense below) and
+ * passed in. Given the same arguments this always returns the same intent.
+ *
+ * @param {{
+ *   outletId: string,
+ *   amount: string,
+ *   category: string,
+ *   note?: string,
+ *   deviceRecordedAt: string,
+ *   clientId: string,
+ * }} params
+ * @returns {{ client_id: string, type: 'expense', payload: import('@ub/shared-types').ExpenseRequest }}
+ */
+export function buildExpenseIntent({ outletId, amount, category, note, deviceRecordedAt, clientId }) {
+  /** @type {import('@ub/shared-types').ExpenseRequest} */
+  const payload = {
+    client_id: clientId,
+    outlet_id: outletId,
+    amount,
+    category,
+    note,
+    device_recorded_at: deviceRecordedAt,
+  };
+
+  return {
+    client_id: clientId,
+    type: "expense",
+    payload,
+  };
+}
+
+/**
  * useSubmitExpense — builds the expense intent and hands it to the shared
  * offline-queue. Mirrors useSubmitSale/useSubmitAdjustment's shape (per
  * ultimate-bookkeeping-v2-outlet-ui-plan.md §3).
@@ -25,22 +60,16 @@ export function useSubmitExpense() {
   const submitExpense = useCallback(async (params) => {
     // Generated once, at intent creation — never regenerated on retry.
     const clientId = generateClientId();
+    const deviceRecordedAt = new Date().toISOString();
 
-    /** @type {import('@ub/shared-types').ExpenseRequest} */
-    const payload = {
-      client_id: clientId,
-      outlet_id: params.outletId,
+    const intent = buildExpenseIntent({
+      outletId: params.outletId,
       amount: params.amount,
       category: params.category,
       note: params.note,
-      device_recorded_at: new Date().toISOString(),
-    };
-
-    const intent = {
-      client_id: clientId,
-      type: "expense",
-      payload,
-    };
+      deviceRecordedAt,
+      clientId,
+    });
 
     setStatus("queued");
     setError(null);

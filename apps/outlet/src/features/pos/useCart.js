@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useReducer } from "react";
 
 /**
  * useCart — pure client-side cart state for the POS screen. Per
@@ -10,6 +10,11 @@ import { useCallback, useMemo, useState } from "react";
  * format, per CLAUDE.md) and are converted to integer cents internally so
  * running-total math never touches floats. Totals are exposed back out as
  * strings, matching what useSubmitSale needs to build the SaleRequest.
+ *
+ * State shape: per tesseract-fp-guide.md §4, cart state is driven by
+ * useReducer over a pure cartReducer(state, action) rather than scattered
+ * useState mutations — cartReducer is exported directly so it can be unit
+ * tested without mounting a component.
  */
 
 /** "15.00" -> 1500 (integer cents). Never use this on untrusted/NaN input without validating first. */
@@ -36,22 +41,43 @@ function fromCents(cents) {
  * @property {number} quantity
  */
 
-export function useCart() {
-  /** @type {[CartLineItem[], Function]} */
-  const [lineItems, setLineItems] = useState([]);
+/** @type {CartLineItem[]} */
+const INITIAL_STATE = [];
 
-  const addItem = useCallback((product, quantity = 1) => {
-    setLineItems((prev) => {
-      const existing = prev.find((li) => li.product_id === product.id);
+/**
+ * cartReducer — pure reducer over the cart's line-item list. Never mutates
+ * `state` or any line item in place; every action returns a new array (and
+ * new line-item objects where changed), per tesseract-fp-guide.md §4's
+ * `addToCart` example. Exported for direct unit testing.
+ *
+ * Actions:
+ *  - ADD_ITEM     { product: { id, name, unit_price }, quantity? } — merges
+ *                  into an existing line (quantity += quantity) or appends
+ *                  a new line. `quantity` defaults to 1.
+ *  - REMOVE_ITEM   { productId } — drops the line entirely.
+ *  - SET_QUANTITY  { productId, quantity } — sets the line's quantity;
+ *                  quantity <= 0 removes the line (same rule REMOVE_ITEM
+ *                  enforces), mirroring a cashier zeroing-out a stepper.
+ *  - CLEAR         {} — empties the cart (post-checkout).
+ *
+ * @param {CartLineItem[]} state
+ * @param {{type: string, [key: string]: unknown}} action
+ * @returns {CartLineItem[]}
+ */
+export function cartReducer(state = INITIAL_STATE, action) {
+  switch (action.type) {
+    case "ADD_ITEM": {
+      const { product, quantity = 1 } = action;
+      const existing = state.find((li) => li.product_id === product.id);
       if (existing) {
-        return prev.map((li) =>
+        return state.map((li) =>
           li.product_id === product.id
             ? { ...li, quantity: li.quantity + quantity }
             : li
         );
       }
       return [
-        ...prev,
+        ...state,
         {
           product_id: product.id,
           name: product.name,
@@ -59,25 +85,47 @@ export function useCart() {
           quantity,
         },
       ];
-    });
+    }
+
+    case "REMOVE_ITEM": {
+      const { productId } = action;
+      return state.filter((li) => li.product_id !== productId);
+    }
+
+    case "SET_QUANTITY": {
+      const { productId, quantity } = action;
+      if (quantity <= 0) {
+        return state.filter((li) => li.product_id !== productId);
+      }
+      return state.map((li) =>
+        li.product_id === productId ? { ...li, quantity } : li
+      );
+    }
+
+    case "CLEAR":
+      return INITIAL_STATE;
+
+    default:
+      return state;
+  }
+}
+
+export function useCart() {
+  const [lineItems, dispatch] = useReducer(cartReducer, INITIAL_STATE);
+
+  const addItem = useCallback((product, quantity = 1) => {
+    dispatch({ type: "ADD_ITEM", product, quantity });
   }, []);
 
   const removeItem = useCallback((productId) => {
-    setLineItems((prev) => prev.filter((li) => li.product_id !== productId));
+    dispatch({ type: "REMOVE_ITEM", productId });
   }, []);
 
   const setQuantity = useCallback((productId, quantity) => {
-    setLineItems((prev) => {
-      if (quantity <= 0) {
-        return prev.filter((li) => li.product_id !== productId);
-      }
-      return prev.map((li) =>
-        li.product_id === productId ? { ...li, quantity } : li
-      );
-    });
+    dispatch({ type: "SET_QUANTITY", productId, quantity });
   }, []);
 
-  const clear = useCallback(() => setLineItems([]), []);
+  const clear = useCallback(() => dispatch({ type: "CLEAR" }), []);
 
   /** Running total as a NUMERIC(12,2) string — computed via integer cents, never floats. */
   const total = useMemo(() => {

@@ -1,10 +1,16 @@
+import { Button } from "@ub/shared-ui";
+
 /**
  * Cart — renders the current sale's line items and running total.
  *
- * Owns: line-item list rendering, quantity +/- and remove controls (wired
- * to the callbacks passed down from useCart via PosScreen).
- * Does NOT own: cart math (useCart computes `total` and mutates line
- * items) or checkout submission (CheckoutModal + useSubmitSale own that).
+ * Owns: line-item list rendering, quantity stepper (+/-) and remove
+ * controls. Pure presentation — every state change is routed back up via
+ * the `onSetQuantity`/`onRemoveItem` callbacks (wired to useCart's
+ * setQuantity/removeItem via PosScreen); this component holds no state of
+ * its own.
+ * Does NOT own: cart math (useCart computes `total` and the line items via
+ * cartReducer) or checkout submission (CheckoutModal + useSubmitSale own
+ * that).
  */
 export default function Cart({
   lineItems = [],
@@ -21,21 +27,30 @@ export default function Cart({
           {lineItems.map((item) => (
             <li key={item.product_id} className="ub-cart__line">
               <span className="ub-cart__line-name">{item.name}</span>
-              <input
-                type="number"
-                min="0"
-                value={item.quantity}
-                onChange={(e) =>
-                  onSetQuantity?.(item.product_id, Number(e.target.value))
-                }
-              />
+              <span className="ub-cart__line-stepper">
+                <Button
+                  variant="secondary"
+                  aria-label={`Decrease quantity of ${item.name}`}
+                  onClick={() => onSetQuantity?.(item.product_id, item.quantity - 1)}
+                >
+                  −
+                </Button>
+                <span className="ub-cart__line-quantity">{item.quantity}</span>
+                <Button
+                  variant="secondary"
+                  aria-label={`Increase quantity of ${item.name}`}
+                  onClick={() => onSetQuantity?.(item.product_id, item.quantity + 1)}
+                >
+                  +
+                </Button>
+              </span>
               <span className="ub-cart__line-price">{item.unit_price}</span>
-              <button
-                type="button"
+              <Button
+                variant="secondary"
                 onClick={() => onRemoveItem?.(item.product_id)}
               >
                 Remove
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

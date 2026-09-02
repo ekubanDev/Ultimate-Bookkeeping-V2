@@ -3,6 +3,43 @@ import { generateClientId } from "@ub/offline-queue/idempotency.js";
 import { enqueue } from "@ub/offline-queue";
 
 /**
+ * buildAdjustmentIntent — pure builder for the offline-queue Intent
+ * wrapping a StockAdjustmentRequest. Per tesseract-fp-guide.md §2/§4: no
+ * `generateClientId()` call inside — `clientId` is an input, generated at
+ * the edge (in submitAdjustment below) and passed in. Given the same
+ * arguments this always returns the same intent.
+ *
+ * Unlike sales/expenses, StockAdjustmentRequest carries no
+ * `device_recorded_at` field (see shared-types/stockAdjustment.ts) — nothing
+ * to build at the edge here beyond the client_id.
+ *
+ * @param {{
+ *   productId: string,
+ *   outletId: string,
+ *   delta: number,
+ *   reason?: import('@ub/shared-types').StockMovementReason,
+ *   clientId: string,
+ * }} params
+ * @returns {{ client_id: string, type: 'stock_adjustment', payload: import('@ub/shared-types').StockAdjustmentRequest }}
+ */
+export function buildAdjustmentIntent({ productId, outletId, delta, reason = "adjustment", clientId }) {
+  /** @type {import('@ub/shared-types').StockAdjustmentRequest} */
+  const payload = {
+    client_id: clientId,
+    product_id: productId,
+    outlet_id: outletId,
+    delta,
+    reason,
+  };
+
+  return {
+    client_id: clientId,
+    type: "stock_adjustment",
+    payload,
+  };
+}
+
+/**
  * useSubmitAdjustment — builds the stock-adjustment intent and hands it to
  * the shared offline-queue. Mirrors useSubmitSale's shape (per
  * ultimate-bookkeeping-v2-outlet-ui-plan.md §3): owns building the intent
@@ -27,20 +64,13 @@ export function useSubmitAdjustment() {
     // Generated once, at intent creation — never regenerated on retry.
     const clientId = generateClientId();
 
-    /** @type {import('@ub/shared-types').StockAdjustmentRequest} */
-    const payload = {
-      client_id: clientId,
-      product_id: params.productId,
-      outlet_id: params.outletId,
+    const intent = buildAdjustmentIntent({
+      productId: params.productId,
+      outletId: params.outletId,
       delta: params.delta,
-      reason: params.reason ?? "adjustment",
-    };
-
-    const intent = {
-      client_id: clientId,
-      type: "stock_adjustment",
-      payload,
-    };
+      reason: params.reason,
+      clientId,
+    });
 
     setStatus("queued");
     setError(null);
