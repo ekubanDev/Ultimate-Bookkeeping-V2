@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@ub/shared-ui";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import ProductGrid from "./ProductGrid.jsx";
 import Cart from "./Cart.jsx";
 import CheckoutModal from "./CheckoutModal.jsx";
@@ -20,28 +21,39 @@ const DEMO_PRODUCTS = [
   { id: "prod-demo-soap", name: "Key Soap", unit_price: "12.00" },
 ];
 
-// TODO: source from the logged-in cashier's outlet context once auth/outlet
-// selection exists — out of scope for this pass (mirrors the same
-// placeholder already used by ExpensesScreen/StockScreen).
-const OUTLET_ID = "TODO-outlet-id";
-
 /**
  * PosScreen — top-level POS screen.
  *
  * Owns: layout and screen-level state (which modal is open, the current
- * outlet_id/context).
+ * outlet_id/context — read from the signed-in manager's /me profile, per
+ * api-contracts.md §1: the backend ignores any client-supplied outlet_id
+ * for managers, so this always sends what /me said).
  * Does NOT own: cart math (delegates to useCart) or API calls (delegates
  * to useSubmitSale). Per ultimate-bookkeeping-v2-outlet-ui-plan.md §3.
  */
 export default function PosScreen() {
+  const { profile } = useAuth();
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const cart = useCart();
   const { submitSale, status } = useSubmitSale();
 
+  // Admin accounts have no outlet_id — this app is for outlet managers only
+  // (the admin console at /apps/admin is where cross-outlet views live, per
+  // CLAUDE.md's scope boundary). Surface a plain notice rather than ever
+  // sending a null outlet_id to the backend.
+  if (!profile?.outlet_id) {
+    return (
+      <section className="ub-pos-screen">
+        <h1>POS</h1>
+        <p>This app is for outlet managers. Your account has no outlet assigned.</p>
+      </section>
+    );
+  }
+
   const handleConfirm = async ({ paymentMethod, discountAmount, taxAmount }) => {
     try {
       await submitSale({
-        outletId: OUTLET_ID,
+        outletId: profile.outlet_id,
         lineItems: cart.lineItems.map((li) => ({
           product_id: li.product_id,
           quantity: li.quantity,

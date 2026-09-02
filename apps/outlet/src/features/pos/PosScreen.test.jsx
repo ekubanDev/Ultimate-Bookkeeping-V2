@@ -11,6 +11,17 @@ vi.mock("@ub/offline-queue", () => ({
   enqueue: (...args) => enqueueMock(...args),
 }));
 
+// PosScreen now reads outlet_id from useAuth().profile rather than a
+// hardcoded placeholder — mock the auth context to a signed-in outlet
+// manager so this test exercises the same shape a real AuthProvider would
+// hand down, without pulling in Firebase/api-client.
+vi.mock("../../auth/AuthContext.jsx", () => ({
+  useAuth: () => ({
+    profile: { id: "user-1", role: "outlet_manager", outlet_id: "outlet-test-1", display_name: "Test Manager" },
+    status: "signed_in",
+  }),
+}));
+
 beforeEach(() => {
   enqueueMock.mockReset();
   enqueueMock.mockResolvedValue({ state: "queued", client_id: "mock-entry" });
@@ -40,7 +51,7 @@ describe("PosScreen — happy checkout path", () => {
     expect(typeof intent.client_id).toBe("string");
     expect(intent.client_id.length).toBeGreaterThan(0);
     expect(intent.payload.client_id).toBe(intent.client_id);
-    expect(intent.payload.outlet_id).toBe("TODO-outlet-id");
+    expect(intent.payload.outlet_id).toBe("outlet-test-1");
     expect(intent.payload.payment_method).toBe("cash");
     expect(intent.payload.discount_amount).toBe("0.00");
     expect(intent.payload.tax_amount).toBe("0.00");

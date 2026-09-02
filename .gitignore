@@ -13,4 +13,6 @@ __pycache__/
 # Env & editor
 .env
 .env.*
+!.env.example
+!apps/outlet/.env.example
 .DS_Store
