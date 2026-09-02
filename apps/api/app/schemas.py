@@ -159,6 +159,24 @@ class ExpenseResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class MeResponse(BaseModel):
+    """GET /api/v1/me — frozen shape, Kojo builds against this exactly (see
+    app/routers/me.py). NOTE: `display_name` is nullable in the `users` table
+    (design.md §2.2 has no NOT NULL on it) even though it isn't marked
+    nullable in the task's literal response shape; modeled here as
+    `str | None` to match the real data rather than silently coercing NULL to
+    `""`. Flagged for Kwame/Ama when this endpoint is added to
+    api-contracts.md.
+    """
+
+    id: uuid.UUID
+    role: str
+    outlet_id: uuid.UUID | None
+    display_name: str | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
