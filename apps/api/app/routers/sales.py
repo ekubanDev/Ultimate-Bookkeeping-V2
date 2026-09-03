@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
+from app.authz import resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError, format_money
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement
@@ -65,23 +66,22 @@ async def create_sale(
     # We reconcile this by treating the authenticated user's own outlet_id as
     # authoritative for outlet_managers (the body value, if present, is
     # ignored); admins have no fixed outlet_id in `users` and must supply the
-    # target outlet explicitly in the body.
-    if current_user.role == "outlet_manager":
-        outlet_id = current_user.outlet_id
-    else:
-        outlet_id = payload.outlet_id
+    # target outlet explicitly in the body. `resolve_authorized_outlet` also
+    # enforces that an admin-supplied outlet_id actually belongs to that
+    # admin's tenant (Nana's IDOR finding) — see app/authz.py.
+    outlet = await resolve_authorized_outlet(db, current_user, payload.outlet_id)
+    outlet_id = outlet.id
 
-    if outlet_id is None:
-        raise AppError(
-            code="VALIDATION_ERROR",
-            message="outlet_id could not be resolved for this user",
-            retryable=False,
-            status_code=422,
-        )
-
-    # --- 2. Verify every product exists ------------------------------------
+    # --- 2. Verify every product exists AND belongs to this outlet's tenant
+    # (Nana's finding: existence alone isn't enough — a product from another
+    # admin's catalog must be rejected exactly like a nonexistent one, so
+    # cross-tenant probing can't tell the two apart. Single query: filter the
+    # IN-lookup by admin_id up front, then compare found vs. requested ids,
+    # rather than a per-item admin_id round trip.)
     product_ids = [item.product_id for item in payload.line_items]
-    products_result = await db.execute(select(Product).where(Product.id.in_(product_ids)))
+    products_result = await db.execute(
+        select(Product).where(Product.id.in_(product_ids), Product.admin_id == outlet.admin_id)
+    )
     products_by_id = {p.id: p for p in products_result.scalars().all()}
     missing = [str(pid) for pid in product_ids if pid not in products_by_id]
     if missing:

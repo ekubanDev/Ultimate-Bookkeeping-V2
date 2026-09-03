@@ -160,6 +160,20 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
+    # Revocation path (Nana's finding, high severity): a disabled account
+    # must be rejected here, on the same users row we already fetched — no
+    # extra query, no Firebase Admin SDK round-trip to revoke/check tokens.
+    # This is deliberately checked after "does a user row exist" (a
+    # not-provisioned account isn't "disabled", it never existed) and before
+    # any role/outlet_id is handed back to a caller.
+    if not user.is_active:
+        raise AppError(
+            code="USER_DISABLED",
+            message="This account has been disabled.",
+            retryable=False,
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
     # Role/outlet_id come exclusively from the users row — never from the
     # token claims or (for endpoints that also accept a body) the request
     # body. Per api-contracts.md §1.

@@ -4,7 +4,7 @@ import uuid
 
 from sqlalchemy import select
 
-from app.models import Product, StockLevel, StockMovement
+from app.models import Product, StockLevel, StockMovement, User
 
 
 def _adjustment_payload(seed, *, client_id="adj-1", delta=-3, reason="adjustment"):
@@ -168,6 +168,41 @@ async def test_product_not_found(client):
     body = resp.json()
     assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
     assert body["error"]["retryable"] is False
+
+
+async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent(client):
+    """Nana's finding: a product that exists but belongs to a different
+    admin's catalog must be rejected exactly like a nonexistent product_id —
+    same status + code — so cross-tenant probing learns nothing."""
+    seed = client.seed
+    other_admin_id = uuid.uuid4()
+    other_product_id = uuid.uuid4()
+    async with client.session_factory() as session:
+        session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        session.add(
+            Product(
+                id=other_product_id,
+                admin_id=other_admin_id,
+                sku="OTHER-SKU",
+                name="Other Widget",
+                unit_price="9.00",
+            )
+        )
+        await session.commit()
+
+    cross_tenant_payload = _adjustment_payload(seed, client_id="adj-cross-tenant-product")
+    cross_tenant_payload["product_id"] = str(other_product_id)
+
+    nonexistent_payload = _adjustment_payload(seed, client_id="adj-nonexistent-product")
+    nonexistent_payload["product_id"] = "00000000-0000-0000-0000-000000000000"
+
+    cross_tenant_resp = await client.post("/api/v1/stock/adjustments", json=cross_tenant_payload)
+    nonexistent_resp = await client.post("/api/v1/stock/adjustments", json=nonexistent_payload)
+
+    assert cross_tenant_resp.status_code == nonexistent_resp.status_code == 404
+    cross_body, nonexistent_body = cross_tenant_resp.json(), nonexistent_resp.json()
+    assert cross_body["error"]["code"] == nonexistent_body["error"]["code"] == "PRODUCT_NOT_FOUND"
+    assert cross_body["error"]["retryable"] == nonexistent_body["error"]["retryable"] is False
 
 
 async def test_rejects_zero_delta(client):

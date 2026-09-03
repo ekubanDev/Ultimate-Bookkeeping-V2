@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 from sqlalchemy import select
 
-from app.models import Sale, SaleLineItem, StockLevel, StockMovement
+from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement, User
 
 
 def _sale_payload(seed, *, client_id="client-1", quantity=2, unit_price="15.00", tax="3.00", discount="0.00"):
@@ -106,6 +107,44 @@ async def test_product_not_found(client):
     body = resp.json()
     assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
     assert body["error"]["retryable"] is False
+
+
+async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent(client):
+    """Nana's finding: a product that exists but belongs to a different
+    admin's catalog must be rejected exactly like a nonexistent product_id —
+    same status + code — so cross-tenant probing learns nothing."""
+    seed = client.seed
+    other_admin_id = uuid.uuid4()
+    other_product_id = uuid.uuid4()
+    async with client.session_factory() as session:
+        session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        session.add(
+            Product(
+                id=other_product_id,
+                admin_id=other_admin_id,
+                sku="OTHER-SKU",
+                name="Other Widget",
+                unit_price=Decimal("9.00"),
+            )
+        )
+        await session.commit()
+
+    cross_tenant_payload = _sale_payload(seed, client_id="client-cross-tenant-product")
+    cross_tenant_payload["line_items"][0]["product_id"] = str(other_product_id)
+
+    nonexistent_payload = _sale_payload(seed, client_id="client-nonexistent-product")
+    nonexistent_payload["line_items"][0]["product_id"] = "00000000-0000-0000-0000-000000000000"
+
+    cross_tenant_resp = await client.post("/api/v1/sales", json=cross_tenant_payload)
+    nonexistent_resp = await client.post("/api/v1/sales", json=nonexistent_payload)
+
+    assert cross_tenant_resp.status_code == nonexistent_resp.status_code == 404
+    cross_body, nonexistent_body = cross_tenant_resp.json(), nonexistent_resp.json()
+    assert cross_body["error"]["code"] == nonexistent_body["error"]["code"] == "PRODUCT_NOT_FOUND"
+    assert cross_body["error"]["retryable"] == nonexistent_body["error"]["retryable"] is False
+
+    # No stock movement/sale row leaked from the rejected cross-tenant line item.
+    assert await _stock_qty(client, seed["product_id"], seed["outlet_id"]) == 10
 
 
 async def test_insufficient_stock_rolls_back_no_partial_rows(client):

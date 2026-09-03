@@ -18,6 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -57,6 +58,13 @@ class User(Base):
     outlet_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("outlets.id"), nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Revocation path (Nana's high-severity finding: no way to disable a
+    # compromised/offboarded account short of deleting the Firebase user
+    # entirely). Checked by `get_current_user` on the same row it already
+    # fetches — no extra query, no Firebase round-trip. Schema addition:
+    # needs a line in design.md §2.2 (not edited here — that doc is owned
+    # by Kwame/Ama).
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

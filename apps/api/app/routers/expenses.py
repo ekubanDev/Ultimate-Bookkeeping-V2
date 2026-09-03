@@ -8,9 +8,11 @@ so this router mirrors routers/sales.py's processing order:
    concurrent duplicate at commit time; roll back and return the winner's
    row instead of erroring.
 
-No stock or product involvement, so there's no PRODUCT_NOT_FOUND/
-INSUFFICIENT_STOCK path here — only VALIDATION_ERROR (money format,
-missing fields) and the idempotency/race handling shared with sales.
+No product involvement, so there's no PRODUCT_NOT_FOUND/INSUFFICIENT_STOCK
+path here — only VALIDATION_ERROR (money format, missing fields),
+OUTLET_NOT_FOUND (unresolvable or cross-tenant outlet_id, via
+app.authz.resolve_authorized_outlet), and the idempotency/race handling
+shared with sales.
 """
 from __future__ import annotations
 
@@ -24,8 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
+from app.authz import resolve_authorized_outlet
 from app.db import get_db
-from app.errors import AppError, format_money
+from app.errors import format_money
 from app.models import Expense
 from app.schemas import ExpenseCreateRequest, ExpenseResponse
 
@@ -60,19 +63,12 @@ async def create_expense(
         body = _expense_to_response(existing, idempotent_replay=True)
         return JSONResponse(status_code=status.HTTP_200_OK, content=body.model_dump(mode="json"))
 
-    # Same outlet_id resolution as routers/sales.py.
-    if current_user.role == "outlet_manager":
-        outlet_id = current_user.outlet_id
-    else:
-        outlet_id = payload.outlet_id
-
-    if outlet_id is None:
-        raise AppError(
-            code="VALIDATION_ERROR",
-            message="outlet_id could not be resolved for this user",
-            retryable=False,
-            status_code=422,
-        )
+    # Same outlet_id resolution as routers/sales.py, now via the shared
+    # resolve_authorized_outlet helper — enforces that an admin-supplied
+    # outlet_id actually belongs to that admin's tenant (Nana's IDOR
+    # finding; see app/authz.py).
+    outlet = await resolve_authorized_outlet(db, current_user, payload.outlet_id)
+    outlet_id = outlet.id
 
     # --- 2. Write expense, one txn ------------------------------------------
     expense = Expense(

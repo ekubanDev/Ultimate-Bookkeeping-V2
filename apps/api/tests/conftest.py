@@ -94,3 +94,29 @@ async def client(session_factory, seed):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def admin_client(session_factory, seed):
+    """Like `client`, but authenticated as the seed tenant's admin (owns
+    seed["outlet_id"] / seed["product_id"]) rather than the outlet_manager —
+    needed for admin-specific tenant-boundary tests (see tests/test_authz.py).
+    """
+
+    async def override_get_db():
+        async with session_factory() as session:
+            yield session
+
+    async def override_get_current_user():
+        return CurrentUser(id=seed["admin_id"], role="admin", outlet_id=None)
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        ac.seed = seed  # type: ignore[attr-defined]
+        ac.session_factory = session_factory  # type: ignore[attr-defined]
+        yield ac
+
+    app.dependency_overrides.clear()

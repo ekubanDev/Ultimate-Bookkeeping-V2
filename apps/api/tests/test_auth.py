@@ -17,6 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from app import auth as auth_module
 from app.db import get_db
 from app.main import app
+from app.models import User
 
 
 def test_importing_auth_does_not_initialize_firebase():
@@ -139,3 +140,34 @@ async def test_me_non_uuid_uid_is_403_user_not_provisioned(real_auth_client, mon
     assert resp.status_code == 403
     body = resp.json()
     assert body["error"]["code"] == "USER_NOT_PROVISIONED"
+
+
+async def test_me_disabled_user_is_403_user_disabled(real_auth_client, monkeypatch, session_factory):
+    """Nana's revocation-gap finding: a disabled user (users.is_active =
+    false) must be rejected by get_current_user itself — checked on the same
+    users row it already fetches, no extra query, no Firebase round-trip."""
+    seed = real_auth_client.seed
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: str(seed["manager_id"]))
+
+    async with session_factory() as session:
+        user = await session.get(User, seed["manager_id"])
+        user.is_active = False
+        await session.commit()
+
+    resp = await real_auth_client.get("/api/v1/me", headers={"Authorization": "Bearer whatever-token"})
+
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["error"]["code"] == "USER_DISABLED"
+    assert body["error"]["retryable"] is False
+
+
+async def test_me_active_user_unaffected_by_is_active_check(real_auth_client, monkeypatch):
+    """Guard against over-tightening: an ordinary active user (the default
+    for every seeded user, is_active default True) must be unaffected."""
+    seed = real_auth_client.seed
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: str(seed["manager_id"]))
+
+    resp = await real_auth_client.get("/api/v1/me", headers={"Authorization": "Bearer whatever-token"})
+
+    assert resp.status_code == 200

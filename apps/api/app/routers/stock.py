@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
+from app.authz import resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError
 from app.models import Product, StockLevel, StockMovement
@@ -90,25 +91,19 @@ async def create_stock_adjustment(
         )
         return JSONResponse(status_code=status.HTTP_200_OK, content=body.model_dump(mode="json"))
 
-    # Same outlet_id resolution as routers/sales.py — the authenticated
-    # outlet_manager's own outlet is authoritative; only admins may target
-    # another outlet via the body.
-    if current_user.role == "outlet_manager":
-        outlet_id = current_user.outlet_id
-    else:
-        outlet_id = payload.outlet_id
+    # Same outlet_id resolution as routers/sales.py, now via the shared
+    # resolve_authorized_outlet helper — enforces that an admin-supplied
+    # outlet_id actually belongs to that admin's tenant (Nana's IDOR
+    # finding; see app/authz.py).
+    outlet = await resolve_authorized_outlet(db, current_user, payload.outlet_id)
+    outlet_id = outlet.id
 
-    if outlet_id is None:
-        raise AppError(
-            code="VALIDATION_ERROR",
-            message="outlet_id could not be resolved for this user",
-            retryable=False,
-            status_code=422,
-        )
-
-    # --- 2. Verify the product exists --------------------------------------
+    # --- 2. Verify the product exists AND belongs to this outlet's tenant --
+    # (Nana's finding — see the matching comment in routers/sales.py. A
+    # product from another admin's catalog is rejected identically to a
+    # nonexistent one.)
     product = await db.get(Product, payload.product_id)
-    if product is None:
+    if product is None or product.admin_id != outlet.admin_id:
         raise AppError(
             code="PRODUCT_NOT_FOUND",
             message=f"Product {payload.product_id} no longer exists in this outlet's catalog.",
@@ -185,19 +180,13 @@ async def get_stock_levels(
 ) -> list[StockLevelResponse]:
     # Outlet scoping enforced from the auth context, not the query param
     # alone (task spec) — same resolution as POST /sales and POST
-    # /stock/adjustments: an outlet_manager's own outlet_id always wins.
-    if current_user.role == "outlet_manager":
-        target_outlet_id = current_user.outlet_id
-    else:
-        target_outlet_id = outlet_id
-
-    if target_outlet_id is None:
-        raise AppError(
-            code="VALIDATION_ERROR",
-            message="outlet_id could not be resolved for this user",
-            retryable=False,
-            status_code=422,
-        )
+    # /stock/adjustments, now via the shared resolve_authorized_outlet
+    # helper: an outlet_manager's own outlet_id always wins, and an
+    # admin-supplied outlet_id must belong to that admin's tenant (Nana's
+    # IDOR finding; see app/authz.py). Nonexistent and another tenant's
+    # outlet_id both surface as the same 404 OUTLET_NOT_FOUND.
+    resolved_outlet = await resolve_authorized_outlet(db, current_user, outlet_id)
+    target_outlet_id = resolved_outlet.id
 
     result = await db.execute(
         select(StockLevel, Product)
