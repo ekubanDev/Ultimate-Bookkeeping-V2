@@ -1,0 +1,15 @@
+{
+  "name": "@ub/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Thin fetch wrappers over POST/GET /api/v1/* — the only place the outlet app talks to the FastAPI backend.",
+  "type": "module",
+  "main": "index.js",
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.1"
+  }
+}

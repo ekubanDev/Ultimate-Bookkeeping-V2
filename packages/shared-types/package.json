@@ -1,0 +1,9 @@
+{
+  "name": "@ub/shared-types",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript types mirroring the FastAPI wire contracts exactly (see ultimate-bookkeeping-v2-api-contracts.md). No runtime code.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "sideEffects": false
+}

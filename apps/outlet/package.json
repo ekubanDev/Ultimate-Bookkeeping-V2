@@ -1,0 +1,29 @@
+{
+  "name": "@ub/outlet",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Ultimate Bookkeeping v2 — Outlet app: POS, stock, expenses for one outlet manager. See CLAUDE.md for scope boundaries.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ub/api-client": "*",
+    "@ub/offline-queue": "*",
+    "@ub/shared-ui": "*",
+    "firebase": "^12.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^14.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "jsdom": "^24.1.3",
+    "vite": "^5.4.0",
+    "vitest": "^1.6.1"
+  }
+}
