@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { onReconnect } from "@ub/offline-queue";
+import { onReconnect, pruneStaleEntries } from "@ub/offline-queue";
 import { useAuth } from "./auth/AuthContext.jsx";
 import LoginScreen from "./auth/LoginScreen.jsx";
 import OutletNav from "./navigation/OutletNav.jsx";
@@ -36,6 +36,17 @@ export default function App() {
   // the moment connectivity returns; api-client's token provider (set by
   // AuthProvider) supplies a fresh token to each replayed request anyway.
   useEffect(() => onReconnect(), []);
+
+  // Startup retention-pruning trigger (Nana's security-review finding — see
+  // @ub/offline-queue's RETENTION_WINDOW_MS docstring): the other trigger,
+  // "after every successful flush()", only fires once something has
+  // actually been dispatched, so a session that opens the app without any
+  // new sale/adjustment/expense wouldn't otherwise get a chance to prune
+  // old synced/discarded history. One cheap IndexedDB scan at mount, not a
+  // timer.
+  useEffect(() => {
+    pruneStaleEntries().catch(() => {});
+  }, []);
 
   if (status === "loading") {
     return (

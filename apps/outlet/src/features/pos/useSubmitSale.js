@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { generateClientId } from "@ub/offline-queue/idempotency.js";
 import { enqueue } from "@ub/offline-queue";
+import { useAuth } from "../../auth/AuthContext.jsx";
 
 /**
  * buildSaleIntent — pure builder for the offline-queue Intent wrapping a
@@ -69,6 +70,7 @@ export function buildSaleIntent(
  * Maps 1:1 to POST /api/v1/sales (ultimate-bookkeeping-v2-api-contracts.md §2).
  */
 export function useSubmitSale() {
+  const { profile } = useAuth();
   const [status, setStatus] = useState(/** @type {'idle'|'queued'|'synced'|'failed'} */ ("idle"));
   const [error, setError] = useState(null);
 
@@ -108,7 +110,12 @@ export function useSubmitSale() {
       // enqueue() persists write-first and returns fast (design doc §3.2) —
       // its `state` is almost always 'queued' here since dispatch happens
       // in the background; 'syncing' collapses to the same UI status.
-      const entry = await enqueue(intent);
+      // `createdBy` binds the acting user's id at enqueue time (Nana's
+      // security-review finding) so a later dispatch — possibly minutes or
+      // hours later, on a shared device, after a shift change — can never
+      // silently submit this sale under whoever happens to be signed in by
+      // then. See @ub/offline-queue's dispatchEntry/reconcileIdentityBlocks.
+      const entry = await enqueue(intent, { createdBy: profile?.id ?? null });
       setStatus(entry?.state === "syncing" ? "queued" : entry?.state ?? "queued");
       return entry;
     } catch (err) {
@@ -116,7 +123,7 @@ export function useSubmitSale() {
       setError(err);
       throw err;
     }
-  }, []);
+  }, [profile?.id]);
 
   return { submitSale, status, error };
 }

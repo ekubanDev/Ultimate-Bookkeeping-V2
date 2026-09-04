@@ -30,13 +30,20 @@ export interface Intent<TPayload = unknown> {
  *               — needs human resolution via retryEntry()/discardEntry().
  *  - discarded: user explicitly abandoned a failed entry. Kept for audit
  *               (never hard-deleted) but excluded from dispatch/flush.
+ *  - blocked_identity_mismatch: this entry's `created_by` doesn't match the
+ *               currently signed-in user (Nana's security-review finding —
+ *               see index.js#dispatchEntry). Held, not dispatched and never
+ *               misattributed; automatically returns to 'queued' the moment
+ *               the *original* creator signs back in on this device (see
+ *               index.js#reconcileIdentityBlocks).
  */
 export type QueueEntryState =
   | "queued"
   | "syncing"
   | "synced"
   | "failed"
-  | "discarded";
+  | "discarded"
+  | "blocked_identity_mismatch";
 
 /** Structured rejection stored on an entry, mirrors the api-contracts.md §1 error envelope. */
 export interface QueueEntryError {
@@ -50,7 +57,7 @@ export interface QueueEntryError {
  * `client_id`. `client_id` is generated once by the caller (see
  * idempotency.js) and never regenerated here, including across retries.
  */
-export interface QueueEntry<TPayload = unknown> {
+export interface QueueEntry<TPayload = unknown, TResponse = unknown> {
   client_id: string;
   type: IntentType;
   payload: TPayload;
@@ -63,6 +70,31 @@ export interface QueueEntry<TPayload = unknown> {
   enqueued_at: number;
   /** epoch ms — set once state becomes 'synced'. */
   synced_at: number | null;
+  /**
+   * epoch ms — set once state becomes 'discarded'. Alongside `synced_at`,
+   * this is what retention pruning (see index.js#pruneStaleEntries) uses to
+   * decide "how long has this terminal entry been sitting here".
+   */
+  discarded_at: number | null;
+  /**
+   * The full parsed 2xx response body from the most recent successful
+   * dispatch (e.g. SaleResponse, including `price_variance_flagged` and the
+   * server-computed money fields) — null until a dispatch actually
+   * succeeds. Previously this response was discarded the moment dispatch
+   * resolved, making every server-returned field (notably
+   * `price_variance_flagged`) unreachable from the UI; see design doc §3.7.
+   */
+  last_response: TResponse | null;
+  /**
+   * The acting user's id (`users.id` / Firebase UID, from `useAuth().profile.id`)
+   * at the moment this intent was enqueued — never the auth token itself,
+   * only an identity/attribution binding. `null` for entries enqueued
+   * without a known signed-in user (e.g. pre-migration entries, or
+   * offline-queue used outside the outlet app's auth context) — those are
+   * never subject to the identity-mismatch check in dispatchEntry(). See
+   * index.js#dispatchEntry / #reconcileIdentityBlocks.
+   */
+  created_by: string | null;
   /**
    * Monotonic tiebreaker for FIFO ordering when two entries share the same
    * `enqueued_at` millisecond (rapid-fire POS entry on a fast device).

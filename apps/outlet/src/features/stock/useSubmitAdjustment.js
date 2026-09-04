@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { generateClientId } from "@ub/offline-queue/idempotency.js";
 import { enqueue } from "@ub/offline-queue";
+import { useAuth } from "../../auth/AuthContext.jsx";
 
 /**
  * buildAdjustmentIntent — pure builder for the offline-queue Intent
@@ -49,6 +50,7 @@ export function buildAdjustmentIntent({ productId, outletId, delta, reason = "ad
  * (ultimate-bookkeeping-v2-api-contracts.md §3).
  */
 export function useSubmitAdjustment() {
+  const { profile } = useAuth();
   const [status, setStatus] = useState(/** @type {'idle'|'queued'|'synced'|'failed'} */ ("idle"));
   const [error, setError] = useState(null);
 
@@ -79,7 +81,9 @@ export function useSubmitAdjustment() {
       // enqueue() persists write-first and returns fast (design doc §3.2) —
       // its `state` is almost always 'queued' here since dispatch happens
       // in the background; 'syncing' collapses to the same UI status.
-      const entry = await enqueue(intent);
+      // `createdBy` binds the acting user's id at enqueue time — see the
+      // matching note in useSubmitSale.js.
+      const entry = await enqueue(intent, { createdBy: profile?.id ?? null });
       setStatus(entry?.state === "syncing" ? "queued" : entry?.state ?? "queued");
       return entry;
     } catch (err) {
@@ -87,7 +91,7 @@ export function useSubmitAdjustment() {
       setError(err);
       throw err;
     }
-  }, []);
+  }, [profile?.id]);
 
   return { submitAdjustment, status, error };
 }

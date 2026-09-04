@@ -101,6 +101,26 @@ export async function getAllEntries() {
 }
 
 /**
+ * Deletes a batch of entries by client_id, in a single readwrite
+ * transaction. Used by retention pruning (index.js#pruneStaleEntries) — the
+ * only caller that ever removes entries outright rather than transitioning
+ * their state, and only ever for entries already confirmed 'synced' or
+ * 'discarded' (never 'queued'/'syncing'/'failed'/'blocked_identity_mismatch').
+ * @param {string[]} clientIds
+ * @returns {Promise<void>}
+ */
+export async function deleteEntries(clientIds) {
+  if (!clientIds || clientIds.length === 0) return;
+  const db = await openDb();
+  const tx = db.transaction(STORE_NAME, "readwrite");
+  const store = tx.objectStore(STORE_NAME);
+  for (const clientId of clientIds) {
+    store.delete(clientId);
+  }
+  await txDone(tx);
+}
+
+/**
  * Test-only escape hatch: closes and forgets the cached DB handle and
  * deletes the underlying database so each test file starts from a clean
  * slate. Not used by app code.

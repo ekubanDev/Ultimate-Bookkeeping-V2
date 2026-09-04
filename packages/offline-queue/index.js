@@ -16,7 +16,7 @@
  */
 
 import { postSale, postStockAdjustment, postExpense, ApiClientError } from "@ub/api-client";
-import { getAllEntries, getEntry, putEntry } from "./db.js";
+import { getAllEntries, getEntry, putEntry, deleteEntries } from "./db.js";
 
 /** Maps an intent `type` to the @ub/api-client function that submits it. */
 const DISPATCHERS = {
@@ -28,6 +28,24 @@ const DISPATCHERS = {
 /** Backoff cap, per design doc §3.4 retry guidance ("retry later with capped exponential backoff"). */
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_CAP_MS = 60_000;
+
+/**
+ * Retention window for terminal ('synced'/'discarded') entries — Nana's
+ * security-review finding: without pruning, the outlet's entire sale/stock/
+ * expense history (amounts, categories, notes) sits unencrypted in
+ * IndexedDB indefinitely on a shared, cheap Android POS device, readable via
+ * DevTools by anyone with local access. 48h is the chosen default: long
+ * enough to comfortably survive a bad-connectivity stretch spanning a whole
+ * weekend closure (so a manager reviewing "did yesterday's sales sync?" via
+ * getQueueSnapshot() the next business day still finds the evidence), short
+ * enough to bound how much financial history is ever sitting in plaintext
+ * local storage at once. Nana's range was 24-72h; 48h splits it. Exported so
+ * it's tunable (per-deployment policy, or a future admin-configurable
+ * setting) without touching this module's internals. NEVER applies to
+ * 'queued'/'syncing'/'failed'/'blocked_identity_mismatch' — those are
+ * unsynced money and are pruned never, regardless of age.
+ */
+export const RETENTION_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 let seqCounter = 0;
 function nextSeq() {
@@ -43,6 +61,33 @@ const listeners = new Set();
 
 /** In-flight flush loop promise, or null when idle. See flush() below. */
 let flushPromise = null;
+
+/**
+ * Injected async function returning the id of the currently signed-in user
+ * (`users.id` / Firebase UID), or null/undefined if nobody is signed in.
+ * Mirrors @ub/api-client's setTokenProvider pattern deliberately: this
+ * package has no Firebase import of its own (dependency points inward —
+ * auth registers itself here), and this is identity for
+ * attribution/consent, NOT a credential — never a token, never persisted to
+ * IndexedDB. Defaults to a provider that resolves `undefined` ("unknown"),
+ * so environments that never call setCurrentUserProvider (tests, or any
+ * offline-queue consumer outside the outlet app's auth context) never
+ * spuriously trip the identity-mismatch check below.
+ * @type {() => Promise<string | null | undefined>}
+ */
+let currentUserProvider = async () => undefined;
+
+/**
+ * Registers the function dispatchEntry calls to obtain the id of the
+ * currently signed-in user, for the identity-binding check (Nana's
+ * security-review finding — see dispatchEntry below). Call this once,
+ * whenever the signed-in user changes (see
+ * apps/outlet/src/auth/AuthContext.jsx).
+ * @param {() => Promise<string | null | undefined>} fn
+ */
+export function setCurrentUserProvider(fn) {
+  currentUserProvider = typeof fn === "function" ? fn : async () => undefined;
+}
 
 function isOnline() {
   if (typeof navigator === "undefined" || typeof navigator.onLine !== "boolean") {
@@ -123,9 +168,15 @@ async function persistAndNotify(entry) {
  * entry is durably queued so the POS flow is never blocked.
  *
  * @param {import('./types').Intent} intent
+ * @param {{ createdBy?: string | null }} [options] `createdBy` — the acting
+ *   user's id (`useAuth().profile.id`), bound at enqueue time so a later
+ *   dispatch can detect (and refuse to silently misattribute under) a
+ *   different signed-in user — see dispatchEntry(). Omit/null for callers
+ *   with no known user (kept backwards-compatible: such entries are never
+ *   subject to the identity-mismatch check).
  * @returns {Promise<import('./types').QueueEntry>}
  */
-export async function enqueue(intent) {
+export async function enqueue(intent, options = {}) {
   if (!intent || !intent.client_id || !intent.type) {
     throw new Error("offline-queue.enqueue: intent requires client_id and type");
   }
@@ -144,6 +195,9 @@ export async function enqueue(intent) {
     last_error: null,
     enqueued_at: now,
     synced_at: null,
+    discarded_at: null,
+    last_response: null,
+    created_by: options.createdBy ?? null,
     seq: nextSeq(),
   };
 
@@ -164,18 +218,52 @@ export async function enqueue(intent) {
  * client_id — never regenerated) via the matching @ub/api-client function,
  * and updates its persisted state based on the response, per design doc
  * §3.4:
- *   - 2xx (idempotent_replay true or false — both are success) -> 'synced'
+ *   - 2xx (idempotent_replay true or false — both are success) -> 'synced',
+ *     with the full response body retained as `last_response` (design doc
+ *     §3.7 — this is what makes `price_variance_flagged` reachable at all)
  *   - retryable:true error, or a network failure                -> stays
  *     'queued', attempts++, backoff-scheduled retry
  *   - retryable:false error                                     -> 'failed',
  *     no further automatic attempts — surfaced via SyncBanner's "resolve"
  *     state until retryEntry()/discardEntry() is called
  *
+ * Before any of that: if this entry has a bound `created_by` (Nana's
+ * security-review finding) and the currently signed-in user is known and
+ * differs from it, the entry is NOT dispatched at all — no network attempt,
+ * no attempts++ — it's held in 'blocked_identity_mismatch' instead. This is
+ * an attribution/consent check, not a credential check: the auth token
+ * itself is still fetched fresh at actual POST time by @ub/api-client's
+ * token provider, same as always.
+ *
  * @param {import('./types').QueueEntry} entry
  * @returns {Promise<import('./types').QueueEntry>}
  */
 async function dispatchEntry(entry) {
   clearScheduledRetry(entry.client_id);
+
+  if (entry.created_by) {
+    const currentUserId = await currentUserProvider();
+    if (currentUserId && currentUserId !== entry.created_by) {
+      // A DIFFERENT, identified user is signed in right now than the one
+      // who created this entry (e.g. Staff A queued offline, logged out,
+      // Staff B is now signed in). Never silently submit under B's
+      // identity — hold it, plainly explained, until A signs back in (see
+      // reconcileIdentityBlocks(), invoked at the top of every flush()).
+      const blocked = {
+        ...entry,
+        state: "blocked_identity_mismatch",
+        last_error: {
+          code: "IDENTITY_MISMATCH",
+          message:
+            "This entry was recorded by a different user than the one currently signed in. It will sync automatically once that user signs back in.",
+          retryable: false,
+        },
+      };
+      await persistAndNotify(blocked);
+      return blocked;
+    }
+  }
+
   await persistAndNotify({ ...entry, state: "syncing" });
 
   const dispatch = DISPATCHERS[entry.type];
@@ -184,13 +272,14 @@ async function dispatchEntry(entry) {
     // idempotent_replay is intentionally not branched on here — per the
     // design/API contracts, a fresh insert and a safe re-send are BOTH
     // success from the queue's perspective.
-    await dispatch(entry.payload);
+    const response = await dispatch(entry.payload);
     const synced = {
       ...entry,
       state: "synced",
       attempts: entry.attempts + 1,
       last_error: null,
       synced_at: Date.now(),
+      last_response: response ?? null,
     };
     await persistAndNotify(synced);
     return synced;
@@ -241,6 +330,75 @@ async function nextQueuedEntry(excludeClientIds) {
 }
 
 /**
+ * Reconciliation pass, run at the top of every flush(): finds entries
+ * currently held in 'blocked_identity_mismatch' whose `created_by` now
+ * matches the currently signed-in user (i.e. the original creator signed
+ * back in) and returns them to 'queued' so the normal FIFO dispatch loop
+ * below picks them up in this same pass. If nobody is signed in, or the
+ * provider hasn't been registered (currentUserId undefined), this is a
+ * cheap no-op — blocked entries stay blocked until we can positively
+ * confirm a matching identity.
+ * @returns {Promise<void>}
+ */
+async function reconcileIdentityBlocks() {
+  const currentUserId = await currentUserProvider();
+  if (!currentUserId) return;
+
+  const all = await getAllEntries();
+  const toUnblock = all.filter(
+    (e) => e.state === "blocked_identity_mismatch" && e.created_by === currentUserId
+  );
+  for (const entry of toUnblock) {
+    await persistAndNotify({ ...entry, state: "queued", last_error: null });
+  }
+}
+
+/**
+ * Retention pruning: permanently deletes 'synced'/'discarded' entries whose
+ * terminal timestamp (`synced_at`/`discarded_at`) is older than
+ * `retentionMs` (see RETENTION_WINDOW_MS's docstring for why 48h).
+ * 'queued'/'syncing'/'failed'/'blocked_identity_mismatch' entries are never
+ * touched, at any age — those are unsynced money, and none of this
+ * function's filtering logic can ever select them (it explicitly checks
+ * `state` before considering an entry). Defensive: an entry missing its
+ * terminal timestamp is skipped rather than pruned, so a bug elsewhere can
+ * never cause premature deletion of real financial history.
+ *
+ * Called automatically at the end of every successful flush() pass and
+ * once at outlet-app startup (see App.jsx) — deliberately NOT on a
+ * setInterval/timer, which would compete with the event loop on a
+ * low-powered shared Android POS device for no benefit (this data isn't
+ * time-critical to remove within seconds of expiring).
+ *
+ * @param {{ now?: number, retentionMs?: number }} [opts]
+ * @returns {Promise<{ prunedCount: number }>}
+ */
+export async function pruneStaleEntries({ now = Date.now(), retentionMs = RETENTION_WINDOW_MS } = {}) {
+  const all = await getAllEntries();
+  const stale = all.filter((entry) => {
+    if (entry.state !== "synced" && entry.state !== "discarded") return false;
+    const resolvedAt = entry.state === "synced" ? entry.synced_at : entry.discarded_at;
+    if (resolvedAt == null) return false;
+    return now - resolvedAt > retentionMs;
+  });
+
+  if (stale.length === 0) return { prunedCount: 0 };
+
+  await deleteEntries(stale.map((entry) => entry.client_id));
+
+  const snapshot = await getQueueSnapshot();
+  for (const listener of listeners) {
+    try {
+      listener(snapshot);
+    } catch {
+      // A listener throwing must never break the queue's own state machine.
+    }
+  }
+
+  return { prunedCount: stale.length };
+}
+
+/**
  * Drains the queue: dispatches every 'queued' entry, one at a time, in FIFO
  * order (by enqueued_at) — sequential, never parallel, so a flaky
  * connection can't interleave partial replays (design doc §3.2/§3.4). The
@@ -267,12 +425,22 @@ export function flush() {
   if (flushPromise) return flushPromise;
   const attemptedThisPass = new Set();
   flushPromise = (async () => {
+    // Reconcile before dispatching: if the original creator of any
+    // 'blocked_identity_mismatch' entry has signed back in, return it to
+    // 'queued' first so it's eligible for the FIFO loop below, in this
+    // same pass.
+    await reconcileIdentityBlocks();
+
     let entry = await nextQueuedEntry(attemptedThisPass);
     while (entry) {
       attemptedThisPass.add(entry.client_id);
       await dispatchEntry(entry);
       entry = await nextQueuedEntry(attemptedThisPass);
     }
+
+    // Retention pruning trigger: "after a successful flush" (see
+    // pruneStaleEntries' docstring for why here, not a timer).
+    await pruneStaleEntries();
   })().finally(() => {
     flushPromise = null;
   });
@@ -340,7 +508,7 @@ export async function discardEntry(clientId) {
     throw new Error(`offline-queue.discardEntry: no entry found for client_id "${clientId}"`);
   }
   clearScheduledRetry(clientId);
-  const discarded = { ...existing, state: "discarded" };
+  const discarded = { ...existing, state: "discarded", discarded_at: Date.now() };
   await persistAndNotify(discarded);
   return discarded;
 }
@@ -355,7 +523,14 @@ export async function discardEntry(clientId) {
 export async function getQueueSnapshot() {
   const entries = (await getAllEntries()).sort(byFifoOrder);
   /** @type {import('./types').QueueSnapshot['counts']} */
-  const counts = { queued: 0, syncing: 0, synced: 0, failed: 0, discarded: 0 };
+  const counts = {
+    queued: 0,
+    syncing: 0,
+    synced: 0,
+    failed: 0,
+    discarded: 0,
+    blocked_identity_mismatch: 0,
+  };
   for (const entry of entries) {
     counts[entry.state] = (counts[entry.state] ?? 0) + 1;
   }

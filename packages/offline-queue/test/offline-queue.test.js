@@ -15,7 +15,7 @@ vi.mock("@ub/api-client", async () => {
 });
 
 const { ApiClientError } = await vi.importActual("@ub/api-client");
-const { _resetForTests, getEntry } = await import("../db.js");
+const { _resetForTests, getEntry, putEntry } = await import("../db.js");
 const { generateClientId } = await import("../idempotency.js");
 const {
   enqueue,
@@ -24,6 +24,9 @@ const {
   discardEntry,
   getQueueSnapshot,
   subscribe,
+  pruneStaleEntries,
+  setCurrentUserProvider,
+  RETENTION_WINDOW_MS,
 } = await import("../index.js");
 
 /** @returns {{client_id: string, type: 'sale', payload: object}} */
@@ -70,10 +73,15 @@ beforeEach(async () => {
   postSaleMock.mockReset();
   postStockAdjustmentMock.mockReset();
   postExpenseMock.mockReset();
+  // Default: "unknown current user" — matches production before any
+  // AuthContext.jsx registration, and keeps the identity-mismatch check
+  // inert for every test that doesn't explicitly opt into it.
+  setCurrentUserProvider(() => Promise.resolve(undefined));
   await _resetForTests();
 });
 
 afterEach(async () => {
+  setCurrentUserProvider(() => Promise.resolve(undefined));
   // Make sure nothing is left mid-flight between tests.
   await flush();
 });
@@ -405,5 +413,263 @@ describe("getQueueSnapshot / subscribe", () => {
     expect(seenStates).toContain("queued");
     expect(seenStates).toContain("syncing");
     expect(seenStates[seenStates.length - 1]).toBe("synced");
+  });
+});
+
+describe("last_response", () => {
+  it("persists the full dispatch response body on a synced entry, including price_variance_flagged", async () => {
+    const clientId = generateClientId();
+    const response = { ...saleResponse(clientId), price_variance_flagged: true };
+    postSaleMock.mockResolvedValueOnce(response);
+
+    await enqueue(buildSaleIntent(clientId));
+    await flush();
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("synced");
+    expect(entry.last_response).toEqual(response);
+  });
+
+  it("is null while queued/syncing, and stays null through a non-retryable failure", async () => {
+    const clientId = generateClientId();
+    postSaleMock.mockRejectedValueOnce(nonRetryableError());
+
+    const queuedEntry = await enqueue(buildSaleIntent(clientId));
+    expect(queuedEntry.last_response).toBeNull();
+
+    await flush();
+    const failedEntry = await getEntry(clientId);
+    expect(failedEntry.state).toBe("failed");
+    expect(failedEntry.last_response).toBeNull();
+  });
+
+  it("an idempotent replay response is persisted too", async () => {
+    const clientId = generateClientId();
+    const response = saleResponse(clientId, /* replay */ true);
+    postSaleMock.mockResolvedValueOnce(response);
+
+    await enqueue(buildSaleIntent(clientId));
+    await flush();
+
+    const entry = await getEntry(clientId);
+    expect(entry.last_response.idempotent_replay).toBe(true);
+  });
+});
+
+describe("pruneStaleEntries", () => {
+  let seedSeq = 1000;
+
+  /** Seeds a terminal-state entry directly via db.js, bypassing enqueue/flush. */
+  function seedEntry(clientId, overrides) {
+    return putEntry({
+      client_id: clientId,
+      type: "sale",
+      payload: buildSaleIntent(clientId).payload,
+      state: "synced",
+      attempts: 1,
+      last_error: null,
+      enqueued_at: Date.now(),
+      synced_at: null,
+      discarded_at: null,
+      last_response: null,
+      created_by: null,
+      seq: seedSeq++,
+      ...overrides,
+    });
+  }
+
+  it("removes synced entries past the retention window, leaves recent ones", async () => {
+    const now = Date.now();
+    const stale = generateClientId();
+    const recent = generateClientId();
+
+    await seedEntry(stale, { synced_at: now - RETENTION_WINDOW_MS - 1 });
+    await seedEntry(recent, { synced_at: now - 1000 });
+
+    const result = await pruneStaleEntries({ now });
+
+    expect(result.prunedCount).toBe(1);
+    expect(await getEntry(stale)).toBeNull();
+    expect(await getEntry(recent)).not.toBeNull();
+  });
+
+  it("removes discarded entries past the retention window using discarded_at, not synced_at", async () => {
+    const now = Date.now();
+    const staleDiscarded = generateClientId();
+
+    await seedEntry(staleDiscarded, {
+      state: "discarded",
+      synced_at: null,
+      discarded_at: now - RETENTION_WINDOW_MS - 1,
+    });
+
+    await pruneStaleEntries({ now });
+
+    expect(await getEntry(staleDiscarded)).toBeNull();
+  });
+
+  it("never prunes queued, syncing, failed, or blocked_identity_mismatch entries, regardless of age", async () => {
+    const now = Date.now();
+    const ancient = now - RETENTION_WINDOW_MS * 10;
+
+    const queuedId = generateClientId();
+    const failedId = generateClientId();
+    const blockedId = generateClientId();
+
+    await seedEntry(queuedId, { state: "queued", synced_at: null, enqueued_at: ancient });
+    await seedEntry(failedId, {
+      state: "failed",
+      synced_at: null,
+      enqueued_at: ancient,
+      last_error: { code: "X", message: "x", retryable: false },
+    });
+    await seedEntry(blockedId, {
+      state: "blocked_identity_mismatch",
+      synced_at: null,
+      enqueued_at: ancient,
+      created_by: "user-A",
+    });
+
+    const result = await pruneStaleEntries({ now });
+
+    expect(result.prunedCount).toBe(0);
+    expect(await getEntry(queuedId)).not.toBeNull();
+    expect(await getEntry(failedId)).not.toBeNull();
+    expect(await getEntry(blockedId)).not.toBeNull();
+  });
+
+  it("skips an entry defensively if its terminal timestamp is missing, rather than pruning it", async () => {
+    const now = Date.now();
+    const noTimestamp = generateClientId();
+    await seedEntry(noTimestamp, { synced_at: null });
+
+    await pruneStaleEntries({ now: now + RETENTION_WINDOW_MS * 10 });
+
+    expect(await getEntry(noTimestamp)).not.toBeNull();
+  });
+
+  it("runs automatically at the end of a flush() pass, even with no queued entries", async () => {
+    const now = Date.now();
+    const stale = generateClientId();
+    await seedEntry(stale, { synced_at: now - RETENTION_WINDOW_MS - 1 });
+
+    await flush();
+
+    expect(await getEntry(stale)).toBeNull();
+  });
+});
+
+describe("identity binding (created_by / blocked_identity_mismatch)", () => {
+  let seedSeq = 2000;
+
+  function seedQueuedEntry(clientId, createdBy) {
+    return putEntry({
+      client_id: clientId,
+      type: "sale",
+      payload: buildSaleIntent(clientId).payload,
+      state: "queued",
+      attempts: 0,
+      last_error: null,
+      enqueued_at: Date.now(),
+      synced_at: null,
+      discarded_at: null,
+      last_response: null,
+      created_by: createdBy,
+      seq: seedSeq++,
+    });
+  }
+
+  it("dispatches normally when the current user matches created_by", async () => {
+    setCurrentUserProvider(() => Promise.resolve("user-A"));
+    const clientId = generateClientId();
+    await seedQueuedEntry(clientId, "user-A");
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId));
+
+    await flush();
+
+    expect(postSaleMock).toHaveBeenCalledTimes(1);
+    expect((await getEntry(clientId)).state).toBe("synced");
+  });
+
+  it("blocks dispatch (no network attempt) when a different, identified user is signed in", async () => {
+    const clientId = generateClientId();
+    await seedQueuedEntry(clientId, "user-A");
+
+    // Staff A queued this offline, logged out, Staff B is now signed in.
+    setCurrentUserProvider(() => Promise.resolve("user-B"));
+    await flush();
+
+    expect(postSaleMock).not.toHaveBeenCalled();
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("blocked_identity_mismatch");
+    expect(entry.attempts).toBe(0); // never counted as a real dispatch attempt
+    expect(entry.last_error).toEqual({
+      code: "IDENTITY_MISMATCH",
+      message: expect.stringMatching(/different user/i),
+      retryable: false,
+    });
+
+    // Staying signed in as B, retrying does nothing new.
+    await flush();
+    expect(postSaleMock).not.toHaveBeenCalled();
+    expect((await getEntry(clientId)).state).toBe("blocked_identity_mismatch");
+  });
+
+  it("resolves automatically once the original creator signs back in", async () => {
+    const clientId = generateClientId();
+    await seedQueuedEntry(clientId, "user-A");
+
+    setCurrentUserProvider(() => Promise.resolve("user-B"));
+    await flush();
+    expect((await getEntry(clientId)).state).toBe("blocked_identity_mismatch");
+
+    // Staff A signs back in.
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId));
+    setCurrentUserProvider(() => Promise.resolve("user-A"));
+    await flush();
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("synced");
+    expect(postSaleMock).toHaveBeenCalledTimes(1);
+    expect(postSaleMock).toHaveBeenCalledWith(
+      expect.objectContaining({ client_id: clientId })
+    );
+  });
+
+  it("entries with no created_by (e.g. pre-migration data) are never subject to the check", async () => {
+    setCurrentUserProvider(() => Promise.resolve("user-B"));
+    const clientId = generateClientId();
+    await seedQueuedEntry(clientId, null);
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId));
+
+    await flush();
+
+    expect((await getEntry(clientId)).state).toBe("synced");
+  });
+
+  it("enqueue() binds createdBy from the passed options and dispatches it once online with a matching user", async () => {
+    setCurrentUserProvider(() => Promise.resolve("user-A"));
+    const clientId = generateClientId();
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId));
+
+    const entry = await enqueue(buildSaleIntent(clientId), { createdBy: "user-A" });
+    expect(entry.created_by).toBe("user-A");
+
+    await flush();
+    expect((await getEntry(clientId)).state).toBe("synced");
+  });
+
+  it("does not block when nobody is confirmed signed in (provider resolves undefined/null)", async () => {
+    const clientId = generateClientId();
+    await seedQueuedEntry(clientId, "user-A");
+
+    setCurrentUserProvider(() => Promise.resolve(null));
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId));
+    await flush();
+
+    // No positively-identified conflicting user — dispatch proceeds as
+    // normal; a real auth failure would surface via the API response
+    // itself (401/etc.), handled by the existing retry/failure paths.
+    expect((await getEntry(clientId)).state).toBe("synced");
   });
 });

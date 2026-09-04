@@ -11,8 +11,22 @@ vi.mock("@ub/offline-queue", () => ({
   enqueue: (...args) => enqueueMock(...args),
   onReconnect: () => () => {},
   getQueueSnapshot: () =>
-    Promise.resolve({ counts: { queued: 0, syncing: 0, synced: 0, failed: 0, discarded: 0 }, entries: [] }),
+    Promise.resolve({
+      counts: {
+        queued: 0,
+        syncing: 0,
+        synced: 0,
+        failed: 0,
+        discarded: 0,
+        blocked_identity_mismatch: 0,
+      },
+      entries: [],
+    }),
   subscribe: () => () => {},
+  // App.jsx calls this once at startup to prune stale synced/discarded
+  // entries (see App.jsx's pruneStaleEntries effect) — not this test's
+  // concern (offline-queue's own tests cover pruning behavior), so stub it.
+  pruneStaleEntries: () => Promise.resolve({ prunedCount: 0 }),
 }));
 
 // App's rendering decision is entirely a function of useAuth()'s status —

@@ -2,7 +2,14 @@ import { useEffect, useState } from "react";
 import { getQueueSnapshot, subscribe } from "@ub/offline-queue";
 
 const EMPTY_SNAPSHOT = {
-  counts: { queued: 0, syncing: 0, synced: 0, failed: 0, discarded: 0 },
+  counts: {
+    queued: 0,
+    syncing: 0,
+    synced: 0,
+    failed: 0,
+    discarded: 0,
+    blocked_identity_mismatch: 0,
+  },
   entries: [],
 };
 
@@ -51,11 +58,31 @@ export function useSyncStatus() {
   const queuedCount = (snapshot.counts.queued ?? 0) + (snapshot.counts.syncing ?? 0);
   const failedEntries = entries.filter((e) => e.state === "failed");
 
+  // Entries held pending the original creator signing back in (Nana's
+  // security-review finding — see @ub/offline-queue's dispatchEntry). This
+  // needs a plain explanation ("they must sign in to sync"), same calm
+  // register as the failed/syncing states — never dropped, never
+  // misattributed, never a till-side alarm.
+  const identityBlockedEntries = entries.filter((e) => e.state === "blocked_identity_mismatch");
+
+  // Synced sales whose server response flagged a price variance
+  // (design doc §3.7). Purely an admin-review signal — this is a *quiet*
+  // marker, deliberately not styled/worded like the failed/blocked states.
+  // Naturally bounded by offline-queue's retention pruning: once a synced
+  // entry ages out (see RETENTION_WINDOW_MS), its marker disappears too.
+  const varianceFlaggedEntries = entries.filter(
+    (e) => e.state === "synced" && e.last_response?.price_variance_flagged === true
+  );
+
   return {
     entries,
     queuedCount,
     failedEntries,
     hasFailures: failedEntries.length > 0,
+    identityBlockedEntries,
+    hasIdentityBlocked: identityBlockedEntries.length > 0,
+    varianceFlaggedEntries,
+    hasVarianceFlags: varianceFlaggedEntries.length > 0,
     loadError,
   };
 }

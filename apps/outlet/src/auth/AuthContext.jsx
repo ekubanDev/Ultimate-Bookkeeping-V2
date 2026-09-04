@@ -5,6 +5,7 @@ import {
   signOut as firebaseSignOut,
 } from "firebase/auth";
 import { getMe, setTokenProvider, ApiClientError } from "@ub/api-client";
+import { setCurrentUserProvider, flush } from "@ub/offline-queue";
 import { auth, isFirebaseConfigured } from "./firebase.js";
 
 /**
@@ -92,6 +93,25 @@ export function AuthProvider({ children }) {
       setTokenProvider(() => Promise.resolve(null));
     }
   }, [firebaseUser]);
+
+  // Binds the acting user's id into @ub/offline-queue for its
+  // identity-mismatch check (Nana's security-review finding) — this is
+  // identity for attribution/consent, NOT a credential: no token is ever
+  // read or persisted here, only `profile.id` (users.id / Firebase UID).
+  // Registered off `state.profile` rather than `firebaseUser` because
+  // that's the id offline-queue entries are bound to (useSubmitSale.js et
+  // al. use `profile.id`, since it's `/me`'s answer, not the raw Firebase
+  // user). Also triggers flush() on every change: this is what makes a
+  // queued entry blocked pending "the original creator signs back in"
+  // actually resolve promptly, rather than waiting on the next unrelated
+  // flush trigger (a reconnect event, or another enqueue()).
+  useEffect(() => {
+    const userId = state.profile?.id ?? null;
+    setCurrentUserProvider(() => Promise.resolve(userId));
+    if (userId) {
+      flush().catch(() => {});
+    }
+  }, [state.profile]);
 
   useEffect(() => {
     if (!isFirebaseConfigured) {

@@ -76,20 +76,14 @@ export default function PosScreen() {
       // sync/failure state after this point is SyncBanner's job, not
       // this screen's.
       //
-      // Design note on `price_variance_flagged` (task item 5): it's an
-      // admin-review signal, not a till-side error, so it should be at
-      // most a quiet indicator here — never a blocking modal. It is
-      // intentionally NOT surfaced yet: `enqueue()` resolves as soon as the
-      // intent is durably queued (offline-first, per design doc §3.2),
-      // before the POST actually happens, and packages/offline-queue's
-      // `QueueEntry` (types.ts) never persists the dispatch response —
-      // only the request payload, error, and timestamps — so nothing in
-      // this app can read `price_variance_flagged` post-sync either. Wiring
-      // this up properly needs a small addition to QueueEntry (e.g.
-      // `last_response`) in packages/offline-queue, which is out of scope
-      // here per the task brief ("work ONLY in apps/outlet and
-      // packages/shared-types"). Flagged for a follow-up with whoever owns
-      // offline-queue.
+      // Design note on `price_variance_flagged`: it's an admin-review
+      // signal, not a till-side error — deliberately NOT surfaced here.
+      // `enqueue()` resolves as soon as the intent is durably queued
+      // (offline-first, per design doc §3.2), before the POST — and even
+      // once synced, it's a quiet marker in SyncBanner (sync-status
+      // feature), never a blocking/alarming state on this screen. See
+      // packages/offline-queue's QueueEntry.last_response +
+      // apps/outlet/src/features/sync-status/SyncBanner.jsx.
       cart.clear();
       setCheckoutOpen(false);
     } catch {
