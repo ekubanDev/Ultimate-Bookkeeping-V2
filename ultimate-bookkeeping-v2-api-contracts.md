@@ -11,6 +11,21 @@
 - Auth: Firebase ID token in `Authorization: Bearer <token>`, verified server-side; role (`admin`/`outlet_manager`) and `outlet_id` resolved from the `users` table, never trusted from the request body.
 - All money fields are strings representing `NUMERIC(12,2)` (e.g. `"145.00"`), never JS floats — avoids precision loss in transit.
 - Every offline-eligible write (sales, stock movements, expenses) requires `client_id` in the body. Every response for those includes `"idempotent_replay": true|false` so the client can tell whether this was a fresh insert or a safe re-send.
+
+### `GET /api/v1/me`
+Returns the authenticated caller's identity, resolved server-side from the `users` table (never trusted from the request).
+
+**Response `200`:**
+```json
+{
+  "id": "uuid",
+  "role": "outlet_manager",
+  "outlet_id": "uuid",
+  "display_name": "Ama Mensah"
+}
+```
+`outlet_id` is `null` for admins and for any `outlet_manager` not yet assigned to an outlet. `display_name` is nullable — not every user has one set (`users.display_name` has no `NOT NULL`, see design doc §2.2).
+
 - Standard error envelope:
 ```json
 {
@@ -23,6 +38,20 @@
 ```
 `retryable: true` tells the client this is worth re-queuing (e.g. transient DB issue); `false` means it needs human resolution (Kojo's "please resolve" UI state) — this maps directly to §3.4 of the design doc.
 
+**Settled error codes** (all `retryable: false`):
+
+| Code | HTTP status |
+|---|---|
+| `PRODUCT_NOT_FOUND` | 404 |
+| `OUTLET_NOT_FOUND` | 404 |
+| `INSUFFICIENT_STOCK` | 409 |
+| `VALIDATION_ERROR` | 422 |
+| `UNAUTHENTICATED` | 401 |
+| `USER_NOT_PROVISIONED` | 403 |
+| `USER_DISABLED` | 403 |
+
+**`outlet_id` resolution rule**, enforced on every endpoint that takes an `outlet_id`: for an `outlet_manager`, the `outlet_id` from their own auth context (`users.outlet_id`) always wins — any `outlet_id` supplied in the request body or query string is ignored. For an `admin`, `outlet_id` must be supplied, and the admin must own that outlet (`outlets.admin_id`) — otherwise the response is `404 OUTLET_NOT_FOUND`, identical to the response for an outlet that doesn't exist at all, so the caller can never distinguish "not yours" from "doesn't exist."
+
 ---
 
 ## 2. Sales (offline-eligible)
@@ -34,25 +63,34 @@
   "client_id": "outlet-7f3a-1234-9c21",
   "outlet_id": "uuid",
   "line_items": [
-    { "product_id": "uuid", "quantity": 2, "unit_price": "15.00" }
+    { "product_id": "uuid", "quantity": 2, "submitted_unit_price": "15.00" }
   ],
   "payment_method": "mobile_money",
-  "discount_amount": "0.00",
+  "discount_type": "percentage",
+  "discount_value": "10.00",
   "tax_amount": "3.00",
   "device_recorded_at": "2026-08-31T18:42:03Z"
 }
 ```
+`discount_value` is a `NUMERIC(12,2)`-shaped string whose *meaning* depends on `discount_type`: `0.00`–`100.00` when `discount_type` is `"percentage"` (this is **not** a money amount — the decimal type is reused for precision only), or a GHS money amount when `discount_type` is `"fixed"`.
+
 **Response `201`:**
 ```json
 {
   "id": "uuid",
   "client_id": "outlet-7f3a-1234-9c21",
   "status": "completed",
-  "total_amount": "33.00",
+  "subtotal_amount": "30.00",
+  "discount_amount": "3.00",
+  "tax_amount": "3.00",
+  "total_amount": "30.00",
+  "price_variance_flagged": false,
   "created_at": "2026-08-31T19:05:11Z",
   "idempotent_replay": false
 }
 ```
+> Server-side pricing authority: `submitted_unit_price` per line is persisted verbatim as `sale_line_items.unit_price` — it is never silently replaced by a live catalog lookup. The server independently computes `subtotal_amount`, `discount_amount`, and `total_amount` from persisted line items and `discount_type`/`discount_value`; none of these three are ever accepted from the client. See `ultimate-bookkeeping-v2-design.md` §3.7 for the full price-variance rule and default tolerance.
+
 **Errors:** `PRODUCT_NOT_FOUND` (retryable: false), `INSUFFICIENT_STOCK` (retryable: false — surfaced to cashier, not silently retried), `VALIDATION_ERROR` (retryable: false).
 
 ### `POST /api/v1/sales/{id}/void`
@@ -61,7 +99,7 @@ Admin/outlet_manager with permission only. Not offline-eligible — voids happen
 { "reason": "customer return" }
 ```
 
-### `GET /api/v1/sales?outlet_id=&from=&to=`
+### `GET /api/v1/sales?outlet_id=&from=&to=&price_variance_flagged=`
 Paginated, `created_at`-ordered (never `device_recorded_at` — per design doc §3.5).
 
 ---

@@ -50,17 +50,24 @@ export default function PosScreen() {
     );
   }
 
-  const handleConfirm = async ({ paymentMethod, discountAmount, taxAmount }) => {
+  const handleConfirm = async ({ paymentMethod, discountType, discountValue, taxAmount }) => {
     try {
       await submitSale({
         outletId: profile.outlet_id,
         lineItems: cart.lineItems.map((li) => ({
           product_id: li.product_id,
           quantity: li.quantity,
-          unit_price: li.unit_price,
+          // Catalog-only: every line item is seeded from DEMO_PRODUCTS/a
+          // real catalog fetch, never hand-typed by the cashier. Renamed
+          // from `unit_price` to `submitted_unit_price` per the new
+          // contract — persisted verbatim server-side; the server (not
+          // this client) decides whether it matches the live catalog price
+          // closely enough (price_variance_flagged).
+          submitted_unit_price: li.unit_price,
         })),
         paymentMethod,
-        discountAmount,
+        discountType,
+        discountValue,
         taxAmount,
       });
       // enqueue() resolving IS success from the cashier's perspective
@@ -68,6 +75,21 @@ export default function PosScreen() {
       // synced, so the cart clears and the modal closes here. Ongoing
       // sync/failure state after this point is SyncBanner's job, not
       // this screen's.
+      //
+      // Design note on `price_variance_flagged` (task item 5): it's an
+      // admin-review signal, not a till-side error, so it should be at
+      // most a quiet indicator here — never a blocking modal. It is
+      // intentionally NOT surfaced yet: `enqueue()` resolves as soon as the
+      // intent is durably queued (offline-first, per design doc §3.2),
+      // before the POST actually happens, and packages/offline-queue's
+      // `QueueEntry` (types.ts) never persists the dispatch response —
+      // only the request payload, error, and timestamps — so nothing in
+      // this app can read `price_variance_flagged` post-sync either. Wiring
+      // this up properly needs a small addition to QueueEntry (e.g.
+      // `last_response`) in packages/offline-queue, which is out of scope
+      // here per the task brief ("work ONLY in apps/outlet and
+      // packages/shared-types"). Flagged for a follow-up with whoever owns
+      // offline-queue.
       cart.clear();
       setCheckoutOpen(false);
     } catch {
@@ -96,7 +118,7 @@ export default function PosScreen() {
       <CheckoutModal
         isOpen={isCheckoutOpen}
         onClose={() => setCheckoutOpen(false)}
-        total={cart.total}
+        subtotal={cart.total}
         status={status}
         onConfirm={handleConfirm}
       />

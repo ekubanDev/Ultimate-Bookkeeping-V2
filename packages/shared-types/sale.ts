@@ -10,11 +10,21 @@ export type PaymentMethod = "cash" | "mobile_money" | "card" | string;
 
 export type SaleStatus = "completed" | "voided";
 
+/** How `discount_value` should be interpreted for a sale. */
+export type DiscountType = "percentage" | "fixed";
+
 export interface SaleLineItemRequest {
+  /** Catalog-only — every line item references a real product. */
   product_id: string;
   quantity: number;
-  /** NUMERIC(12,2) as a string, e.g. "15.00" */
-  unit_price: string;
+  /**
+   * NUMERIC(12,2) as a string, e.g. "15.00". Persisted verbatim server-side
+   * as `sale_line_items.unit_price` — never silently replaced by a live
+   * catalog lookup. The server independently computes `subtotal_amount`,
+   * `discount_amount`, and `total_amount`; none of those are accepted from
+   * the client.
+   */
+  submitted_unit_price: string;
 }
 
 /** Request body for POST /api/v1/sales */
@@ -24,8 +34,15 @@ export interface SaleRequest {
   outlet_id: string;
   line_items: SaleLineItemRequest[];
   payment_method: PaymentMethod;
-  /** NUMERIC(12,2) as a string */
-  discount_amount: string;
+  /** Cart-level discount kind — percentage or a fixed GHS amount. */
+  discount_type: DiscountType;
+  /**
+   * NUMERIC(12,2)-shaped string whose *meaning* depends on `discount_type`:
+   * "0.00"–"100.00" when `discount_type` is "percentage" (not a money
+   * amount — the decimal type is reused for precision only), or a GHS money
+   * amount when `discount_type` is "fixed".
+   */
+  discount_value: string;
   /** NUMERIC(12,2) as a string */
   tax_amount: string;
   /** Client-side timestamp, audit-only — never used for ordering. ISO 8601. */
@@ -37,8 +54,20 @@ export interface SaleResponse {
   id: string;
   client_id: string;
   status: SaleStatus;
+  /** NUMERIC(12,2) as a string — server-computed sum of line items before discount/tax. */
+  subtotal_amount: string;
+  /** NUMERIC(12,2) as a string — server-computed money value of the discount. */
+  discount_amount: string;
   /** NUMERIC(12,2) as a string */
+  tax_amount: string;
+  /** NUMERIC(12,2) as a string — the authoritative total. The client's own preview total is never trusted. */
   total_amount: string;
+  /**
+   * True when a submitted line's `submitted_unit_price` diverged from the
+   * live catalog price beyond the server's tolerance. Admin-review signal
+   * only — never blocks or alarms the till.
+   */
+  price_variance_flagged: boolean;
   /** Server-assigned. ISO 8601. */
   created_at: string;
   /** True if this response is a safe re-send of a prior insert, not a fresh one. */

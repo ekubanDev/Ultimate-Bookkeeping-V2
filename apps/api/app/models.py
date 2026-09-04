@@ -150,8 +150,23 @@ class Sale(Base):
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     outlet_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("outlets.id"), nullable=False)
     client_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # subtotal_amount is stored (not just derivable from line_total sums) so
+    # the response can return it without recomputation drift risk — see
+    # app/pricing.py for the server-authoritative computation this mirrors.
+    subtotal_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
     total_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     tax_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
+    # Server-authoritative pricing (Ama's spec, prompted by Nana's skimming
+    # finding): `discount_type`/`discount_value` are the raw cashier input
+    # (percentage 0.00-100.00, or a fixed GHS amount); `discount_amount` is
+    # ALWAYS server-computed from them (app/pricing.py) and never accepted
+    # directly from the client.
+    discount_type: Mapped[str] = mapped_column(
+        Enum("percentage", "fixed", name="sale_discount_type", native_enum=False),
+        nullable=False,
+        default="fixed",
+    )
+    discount_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
     discount_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
     payment_method: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
@@ -173,8 +188,21 @@ class SaleLineItem(Base):
     sale_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("sales.id"), nullable=False)
     product_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("products.id"), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Price actually charged, persisted verbatim — never replaced by a
+    # catalog lookup. A completed, paid transaction is not repriced after
+    # the fact (Ama's spec).
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Audit-only snapshot of products.unit_price read at transaction-commit
+    # time — never used in money math (app/pricing.py never reads this
+    # column back into a computation, only writes it).
+    catalog_unit_price_at_sale: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Flag-only signal (never blocks/delays/alters the sale) — true when
+    # `unit_price` deviates from `catalog_unit_price_at_sale` beyond
+    # tolerance; see app/pricing.py `is_price_variance_flagged`.
+    price_variance_flagged: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
 
     sale: Mapped["Sale"] = relationship(back_populates="line_items")
 

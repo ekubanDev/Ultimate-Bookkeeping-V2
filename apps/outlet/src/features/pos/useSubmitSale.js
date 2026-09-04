@@ -10,11 +10,19 @@ import { enqueue } from "@ub/offline-queue";
  * the same arguments this always returns the same intent, so it's directly
  * unit-testable without touching IndexedDB or the clock.
  *
- * @param {Array<{ product_id: string, quantity: number, unit_price: string }>} lineItems
+ * Cart-level discount is now a type+value pair (percentage or fixed GHS
+ * amount), mirroring v1's `applyDiscount()` UX — a single pre-computed
+ * `discount_amount` lost that semantic. Every line item carries its
+ * catalog-seeded `submitted_unit_price`, persisted verbatim server-side;
+ * the server, not this builder, is authoritative for
+ * subtotal/discount/total (ultimate-bookkeeping-v2-api-contracts.md §2).
+ *
+ * @param {Array<{ product_id: string, quantity: number, submitted_unit_price: string }>} lineItems
  * @param {{
  *   outletId: string,
  *   paymentMethod: string,
- *   discountAmount?: string,
+ *   discountType?: import('@ub/shared-types').DiscountType,
+ *   discountValue?: string,
  *   taxAmount?: string,
  *   deviceRecordedAt: string,
  *   clientId: string,
@@ -23,7 +31,15 @@ import { enqueue } from "@ub/offline-queue";
  */
 export function buildSaleIntent(
   lineItems,
-  { outletId, paymentMethod, discountAmount = "0.00", taxAmount = "0.00", deviceRecordedAt, clientId }
+  {
+    outletId,
+    paymentMethod,
+    discountType = "fixed",
+    discountValue = "0.00",
+    taxAmount = "0.00",
+    deviceRecordedAt,
+    clientId,
+  }
 ) {
   /** @type {import('@ub/shared-types').SaleRequest} */
   const payload = {
@@ -31,7 +47,8 @@ export function buildSaleIntent(
     outlet_id: outletId,
     line_items: lineItems,
     payment_method: paymentMethod,
-    discount_amount: discountAmount,
+    discount_type: discountType,
+    discount_value: discountValue,
     tax_amount: taxAmount,
     device_recorded_at: deviceRecordedAt,
   };
@@ -58,9 +75,10 @@ export function useSubmitSale() {
   /**
    * @param {{
    *   outletId: string,
-   *   lineItems: Array<{ product_id: string, quantity: number, unit_price: string }>,
+   *   lineItems: Array<{ product_id: string, quantity: number, submitted_unit_price: string }>,
    *   paymentMethod: string,
-   *   discountAmount?: string,
+   *   discountType?: import('@ub/shared-types').DiscountType,
+   *   discountValue?: string,
    *   taxAmount?: string,
    * }} params
    */
@@ -76,7 +94,8 @@ export function useSubmitSale() {
     const intent = buildSaleIntent(params.lineItems, {
       outletId: params.outletId,
       paymentMethod: params.paymentMethod,
-      discountAmount: params.discountAmount,
+      discountType: params.discountType,
+      discountValue: params.discountValue,
       taxAmount: params.taxAmount,
       deviceRecordedAt,
       clientId,

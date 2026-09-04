@@ -35,7 +35,8 @@ Design principles: every financial mutation is a row in an append-friendly ledge
 | role | enum('admin','outlet_manager') | |
 | outlet_id | uuid, FK → outlets.id | nullable, set for outlet_manager |
 | created_by | uuid, FK → users.id | nullable, admin who created this manager |
-| display_name | text | |
+| display_name | text | nullable |
+| is_active | boolean, NOT NULL, server default true | server-controlled account revocation switch — a disabled user gets `403 USER_DISABLED` on every request, regardless of a still-valid Firebase token |
 | created_at | timestamptz | |
 
 ### 2.3 `products`
@@ -78,9 +79,12 @@ Design principles: every financial mutation is a row in an append-friendly ledge
 | id | uuid, PK | |
 | outlet_id | uuid, FK → outlets.id | |
 | client_id | text, UNIQUE | idempotency key from the device that recorded it |
-| total_amount | numeric(12,2) | |
-| tax_amount | numeric(12,2) | |
-| discount_amount | numeric(12,2) | |
+| subtotal_amount | numeric(12,2) | server-computed sum of line_totals before discount/tax; stored rather than derived at read time so reports never disagree with what was committed, see §3.7 |
+| total_amount | numeric(12,2) | server-computed, never accepted from the client, see §3.7 |
+| tax_amount | numeric(12,2) | client-submitted and trusted — tax authority is deliberately out of scope for this rebuild |
+| discount_type | enum('percentage','fixed') | how the cashier entered the discount |
+| discount_value | numeric(12,2) | raw cashier input; 0.00–100.00 when discount_type='percentage' (not a money amount — column reused for decimal precision only), a GHS amount when discount_type='fixed' |
+| discount_amount | numeric(12,2) | server-computed money discount actually applied — never accepted from the client, see §3.7 |
 | payment_method | text | |
 | status | enum('completed','voided') | |
 | created_by | uuid, FK → users.id | |
@@ -94,7 +98,9 @@ Design principles: every financial mutation is a row in an append-friendly ledge
 | sale_id | uuid, FK → sales.id | |
 | product_id | uuid, FK → products.id | |
 | quantity | integer | |
-| unit_price | numeric(12,2) | price at time of sale, not a live product lookup |
+| unit_price | numeric(12,2) | the price actually charged for this line — persisted verbatim from the client's submitted_unit_price; never retroactively repriced from the catalog at sync time |
+| catalog_unit_price_at_sale | numeric(12,2) | the outlet's live products.unit_price at the moment this line was committed server-side — audit/variance comparison only, never used in money math |
+| price_variance_flagged | boolean | true when abs(unit_price − catalog_unit_price_at_sale) exceeds the tolerance in §3.7; never blocks the sale |
 | line_total | numeric(12,2) | |
 
 ### 2.8 `expenses`, `liabilities`, `settlements`
@@ -148,6 +154,27 @@ On receipt, the endpoint:
 
 ### 3.6 What's explicitly out of scope for offline
 Per Ama's earlier call: only **sales, stock movements/adjustments, and expense entry** get the offline queue. Reports, dashboards, settlements, and all admin-console actions are online-only with a clear "you're offline" state — no queue, no sync logic, no idempotency concerns for those paths. Keeping this boundary tight is what keeps the sync layer maintainable.
+
+### 3.7 Price & discount integrity
+Nana's security review flagged that `total_amount` was being computed entirely from client-supplied prices — a skimming vector (a compromised or tampered device could under-report the price charged and pocket the difference). This section is the fix, per Ama's finalized pricing spec. POS is catalog-only for this rebuild — `product_id` is required on every line item; there is no free-text/non-catalog line-item flow. Tax stays out of scope: `tax_amount` remains client-submitted and trusted, unchanged.
+
+**Verbatim persist, never retroactively repriced.** `sale_line_items.unit_price` is persisted exactly as the client's `submitted_unit_price`, once, at insert time. A completed, paid sale is never repriced after the fact — not at sync time, not later — even when a subsequent catalog price change would make the original price look "wrong." What the cashier actually charged is what gets recorded, permanently.
+
+**Server-only money computation.** `subtotal_amount`, `discount_amount`, and `total_amount` are computed server-side from the persisted line items and `discount_type`/`discount_value`. None of the three is ever accepted from the client, even if present in the request body.
+
+**Computation order** (server-side, exactly once, in this order):
+1. `line_total = quantity × unit_price` — exact, no intermediate rounding.
+2. `subtotal_amount = sum(line_total)` across all line items.
+3. Discount:
+   - `discount_type = 'fixed'` → `discount_amount = min(discount_value, subtotal_amount)` (a discount can never exceed the subtotal it's applied to).
+   - `discount_type = 'percentage'` → `discount_amount = round_half_up(subtotal_amount × discount_value / 100, 2dp)` — computed **once**, against the subtotal, never per-line and never applied twice.
+4. `total_amount = subtotal_amount − discount_amount + tax_amount`, floored at `0.00`.
+
+**Validation.** `discount_value` outside `0.00`–`100.00` when `discount_type = 'percentage'` → `422 VALIDATION_ERROR`.
+
+**Price-variance flagging.** `price_variance_flagged := abs(unit_price − catalog_unit_price_at_sale) > max(2% of catalog_unit_price_at_sale, GHS 0.50)`. Ama's reasoning for the hybrid tolerance: a pure percentage threshold floods the review queue with pesewa-level rounding noise on cheap goods, while a pure flat-amount threshold hides real price overrides on expensive goods — the `max()` of both catches genuine outliers at both ends without over-flagging. This is a starting value, to be revisited once ~4 weeks of production flagged-queue data is available.
+
+Flagging is purely observational: it never blocks, delays, discounts, or otherwise alters a sale — it only marks the line item for later human review. The admin-facing review queue that consumes `price_variance_flagged` lives in `/apps/admin` and is out of scope for this repo.
 
 ---
 

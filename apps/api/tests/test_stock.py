@@ -115,9 +115,10 @@ async def test_adjustment_replay_lookup_does_not_collide_with_sale_movements(cli
     sale_payload = {
         "client_id": shared_client_id,
         "outlet_id": str(seed["outlet_id"]),
-        "line_items": [{"product_id": str(seed["product_id"]), "quantity": 1, "unit_price": "15.00"}],
+        "line_items": [{"product_id": str(seed["product_id"]), "quantity": 1, "submitted_unit_price": "15.00"}],
         "payment_method": "cash",
-        "discount_amount": "0.00",
+        "discount_type": "fixed",
+        "discount_value": "0.00",
         "tax_amount": "0.00",
         "device_recorded_at": "2026-08-31T18:42:03Z",
     }

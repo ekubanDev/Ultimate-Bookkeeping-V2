@@ -136,9 +136,12 @@ async def test_admin_cannot_write_another_tenants_sale(admin_client):
         json={
             "client_id": "cross-tenant-sale",
             "outlet_id": str(other["outlet_id"]),
-            "line_items": [{"product_id": str(other["product_id"]), "quantity": 1, "unit_price": "9.00"}],
+            "line_items": [
+                {"product_id": str(other["product_id"]), "quantity": 1, "submitted_unit_price": "9.00"}
+            ],
             "payment_method": "cash",
-            "discount_amount": "0.00",
+            "discount_type": "fixed",
+            "discount_value": "0.00",
             "tax_amount": "0.00",
         },
     )

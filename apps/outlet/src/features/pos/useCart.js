@@ -127,7 +127,17 @@ export function useCart() {
 
   const clear = useCallback(() => dispatch({ type: "CLEAR" }), []);
 
-  /** Running total as a NUMERIC(12,2) string — computed via integer cents, never floats. */
+  /**
+   * Running subtotal (pre-discount, pre-tax) as a NUMERIC(12,2) string —
+   * computed via integer cents, never floats. This is a CLIENT-SIDE PREVIEW
+   * ONLY, shown to the cashier while building the cart. Discount/tax are
+   * applied at checkout (CheckoutModal) and, per
+   * ultimate-bookkeeping-v2-api-contracts.md §2, the server is the sole
+   * pricing authority — it independently (re)computes
+   * subtotal_amount/discount_amount/total_amount from the persisted line
+   * items server-side; the POST /api/v1/sales response's `total_amount` is
+   * the real, receipt-worthy figure, never this value.
+   */
   const total = useMemo(() => {
     const totalCents = lineItems.reduce(
       (sum, li) => sum + toCents(li.unit_price) * li.quantity,

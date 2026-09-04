@@ -53,10 +53,12 @@ describe("PosScreen — happy checkout path", () => {
     expect(intent.payload.client_id).toBe(intent.client_id);
     expect(intent.payload.outlet_id).toBe("outlet-test-1");
     expect(intent.payload.payment_method).toBe("cash");
-    expect(intent.payload.discount_amount).toBe("0.00");
+    // Default checkout state: no discount applied (percentage, 0.00%).
+    expect(intent.payload.discount_type).toBe("percentage");
+    expect(intent.payload.discount_value).toBe("0.00");
     expect(intent.payload.tax_amount).toBe("0.00");
     expect(intent.payload.line_items).toEqual([
-      { product_id: "prod-demo-water", quantity: 1, unit_price: "5.00" },
+      { product_id: "prod-demo-water", quantity: 1, submitted_unit_price: "5.00" },
     ]);
     expect(typeof intent.payload.device_recorded_at).toBe("string");
 
@@ -82,5 +84,45 @@ describe("PosScreen — happy checkout path", () => {
     // Cart is NOT cleared and the modal stays open on failure.
     expect(screen.queryByText("Cart is empty.")).toBeNull();
     expect(screen.getByRole("button", { name: /confirm sale/i })).toBeTruthy();
+  });
+
+  it("submits a percentage discount as discount_type/discount_value, not a money amount", async () => {
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+    await screen.findByRole("button", { name: /confirm sale/i });
+
+    // Percentage is the default type — just fill in a value.
+    fireEvent.change(screen.getByLabelText(/discount value \(%\)/i), {
+      target: { value: "10.00" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm sale/i }));
+
+    await vi.waitFor(() => expect(enqueueMock).toHaveBeenCalledTimes(1));
+    const [intent] = enqueueMock.mock.calls[0];
+    expect(intent.payload.discount_type).toBe("percentage");
+    expect(intent.payload.discount_value).toBe("10.00");
+  });
+
+  it("submits a fixed discount as discount_type/discount_value after toggling the discount type", async () => {
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+    await screen.findByRole("button", { name: /confirm sale/i });
+
+    fireEvent.click(screen.getByRole("radio", { name: /fixed amount \(ghs\)/i }));
+    fireEvent.change(screen.getByLabelText(/discount value \(ghs\)/i), {
+      target: { value: "5.00" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm sale/i }));
+
+    await vi.waitFor(() => expect(enqueueMock).toHaveBeenCalledTimes(1));
+    const [intent] = enqueueMock.mock.calls[0];
+    expect(intent.payload.discount_type).toBe("fixed");
+    expect(intent.payload.discount_value).toBe("5.00");
   });
 });

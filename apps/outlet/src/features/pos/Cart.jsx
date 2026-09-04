@@ -11,6 +11,11 @@ import { Button } from "@ub/shared-ui";
  * Does NOT own: cart math (useCart computes `total` and the line items via
  * cartReducer) or checkout submission (CheckoutModal + useSubmitSale own
  * that).
+ *
+ * `total` here is the running SUBTOTAL (pre-discount, pre-tax) — a preview
+ * for the cashier while building the cart, not the final amount due. See
+ * useCart's `total` doc comment: the server is the sole pricing authority,
+ * and discount/tax are only entered at checkout (CheckoutModal).
  */
 export default function Cart({
   lineItems = [],
@@ -55,7 +60,7 @@ export default function Cart({
           ))}
         </ul>
       )}
-      <div className="ub-cart__total">Total: {total}</div>
+      <div className="ub-cart__total">Subtotal: {total}</div>
     </div>
   );
 }

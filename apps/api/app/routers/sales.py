@@ -14,12 +14,14 @@ Processing order, matching design.md §3.4:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
@@ -27,24 +29,42 @@ from app.authz import resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError, format_money
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement
-from app.schemas import SaleCreateRequest, SaleResponse
+from app.pricing import LineItemInput, compute_sale_totals
+from app.schemas import SaleCreateRequest, SaleListItemResponse, SaleResponse
 
 router = APIRouter(prefix="/api/v1/sales", tags=["sales"])
 
 
-def _sale_to_response(sale: Sale, *, idempotent_replay: bool) -> SaleResponse:
+def _sale_line_items_flagged(sale: Sale) -> bool:
+    """OR across a (already-loaded) sale's line items' `price_variance_flagged`
+    columns. Callers must have eager-loaded `sale.line_items` (selectinload)
+    — this never issues a query itself, to keep it safe to call from async
+    contexts without triggering an implicit lazy-load."""
+    return any(item.price_variance_flagged for item in sale.line_items)
+
+
+def _sale_to_response(sale: Sale, *, price_variance_flagged: bool, idempotent_replay: bool) -> SaleResponse:
     return SaleResponse(
         id=sale.id,
         client_id=sale.client_id,
         status=sale.status,
+        subtotal_amount=format_money(Decimal(sale.subtotal_amount)),
+        discount_amount=format_money(Decimal(sale.discount_amount)),
+        tax_amount=format_money(Decimal(sale.tax_amount)),
         total_amount=format_money(Decimal(sale.total_amount)),
+        price_variance_flagged=price_variance_flagged,
         created_at=sale.created_at,
         idempotent_replay=idempotent_replay,
     )
 
 
 async def _fetch_by_client_id(db: AsyncSession, client_id: str) -> Sale | None:
-    result = await db.execute(select(Sale).where(Sale.client_id == client_id))
+    # Eager-load line_items (selectinload) so idempotent-replay responses
+    # can compute `price_variance_flagged` without an implicit lazy-load
+    # (unsafe/unsupported under AsyncSession outside an explicit await).
+    result = await db.execute(
+        select(Sale).where(Sale.client_id == client_id).options(selectinload(Sale.line_items))
+    )
     return result.scalar_one_or_none()
 
 
@@ -57,7 +77,9 @@ async def create_sale(
     # --- 1. Idempotency first (design.md §3.4 step 1) ---------------------
     existing = await _fetch_by_client_id(db, payload.client_id)
     if existing is not None:
-        body = _sale_to_response(existing, idempotent_replay=True)
+        body = _sale_to_response(
+            existing, price_variance_flagged=_sale_line_items_flagged(existing), idempotent_replay=True
+        )
         return JSONResponse(status_code=status.HTTP_200_OK, content=body.model_dump(mode="json"))
 
     # Resolution note (ambiguity, resolved): api-contracts.md §2 shows
@@ -113,18 +135,37 @@ async def create_sale(
             )
 
     # --- 4. Compute totals (Decimal only, never float) ----------------------
-    line_totals: list[Decimal] = [item.quantity * item.unit_price_decimal for item in payload.line_items]
-    subtotal = sum(line_totals, Decimal("0.00"))
-    total_amount = subtotal - payload.discount_amount_decimal + payload.tax_amount_decimal
+    # Server-authoritative pricing (Ama's spec): pure computation lives in
+    # app/pricing.py, fed with `catalog_unit_price` read from `products`
+    # HERE, at transaction-commit time (not intent-creation time) — never
+    # the client-supplied price, and never fed back into the money math,
+    # only used for the audit snapshot + variance flag.
+    line_inputs = [
+        LineItemInput(
+            quantity=item.quantity,
+            unit_price=item.submitted_unit_price_decimal,
+            catalog_unit_price=Decimal(products_by_id[item.product_id].unit_price),
+        )
+        for item in payload.line_items
+    ]
+    totals = compute_sale_totals(
+        line_inputs,
+        discount_type=payload.discount_type,
+        discount_value=payload.discount_value_decimal,
+        tax_amount=payload.tax_amount_decimal,
+    )
 
     # --- 5. Write sale + line items + stock movements + stock cache, one txn
     sale = Sale(
         id=uuid.uuid4(),
         outlet_id=outlet_id,
         client_id=payload.client_id,
-        total_amount=total_amount,
-        tax_amount=payload.tax_amount_decimal,
-        discount_amount=payload.discount_amount_decimal,
+        subtotal_amount=totals.subtotal_amount,
+        total_amount=totals.total_amount,
+        tax_amount=totals.tax_amount,
+        discount_type=payload.discount_type,
+        discount_value=payload.discount_value_decimal,
+        discount_amount=totals.discount_amount,
         payment_method=payload.payment_method,
         status="completed",
         created_by=current_user.id,
@@ -132,15 +173,18 @@ async def create_sale(
     )
     db.add(sale)
 
-    for item, line_total in zip(payload.line_items, line_totals):
+    for item, computed_line in zip(payload.line_items, totals.line_items):
         db.add(
             SaleLineItem(
                 id=uuid.uuid4(),
                 sale_id=sale.id,
                 product_id=item.product_id,
                 quantity=item.quantity,
-                unit_price=item.unit_price_decimal,
-                line_total=line_total,
+                # Persisted verbatim — never replaced by a catalog lookup.
+                unit_price=computed_line.unit_price,
+                line_total=computed_line.line_total,
+                catalog_unit_price_at_sale=computed_line.catalog_unit_price_at_sale,
+                price_variance_flagged=computed_line.price_variance_flagged,
             )
         )
         db.add(
@@ -179,9 +223,73 @@ async def create_sale(
         winner = await _fetch_by_client_id(db, payload.client_id)
         if winner is None:
             raise
-        body = _sale_to_response(winner, idempotent_replay=True)
+        body = _sale_to_response(
+            winner, price_variance_flagged=_sale_line_items_flagged(winner), idempotent_replay=True
+        )
         return JSONResponse(status_code=status.HTTP_200_OK, content=body.model_dump(mode="json"))
 
     await db.refresh(sale)
-    body = _sale_to_response(sale, idempotent_replay=False)
+    body = _sale_to_response(sale, price_variance_flagged=totals.price_variance_flagged, idempotent_replay=False)
     return JSONResponse(status_code=status.HTTP_201_CREATED, content=body.model_dump(mode="json"))
+
+
+@router.get("", response_model=list[SaleListItemResponse])
+async def list_sales(
+    outlet_id: uuid.UUID | None = Query(default=None),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = Query(default=None),
+    # New filter this change adds — the hook a future admin review queue
+    # needs (task spec). `None` (default) means "no filter", matching every
+    # other optional query param on this endpoint.
+    price_variance_flagged: bool | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[SaleListItemResponse]:
+    """api-contracts.md §2: `GET /api/v1/sales?outlet_id=&from=&to=`,
+    paginated, `created_at`-ordered (never `device_recorded_at` — design.md
+    §3.5). Outlet scoping mirrors POST /sales / GET /stock/levels via the
+    shared `resolve_authorized_outlet` helper.
+    """
+    resolved_outlet = await resolve_authorized_outlet(db, current_user, outlet_id)
+    target_outlet_id = resolved_outlet.id
+
+    query = (
+        select(Sale)
+        .where(Sale.outlet_id == target_outlet_id)
+        .options(selectinload(Sale.line_items))
+        .order_by(Sale.created_at)
+    )
+    if from_ is not None:
+        query = query.where(Sale.created_at >= from_)
+    if to is not None:
+        query = query.where(Sale.created_at <= to)
+    if price_variance_flagged is not None:
+        flagged_line_exists = (
+            select(SaleLineItem.id)
+            .where(SaleLineItem.sale_id == Sale.id, SaleLineItem.price_variance_flagged.is_(True))
+            .exists()
+        )
+        query = query.where(flagged_line_exists if price_variance_flagged else ~flagged_line_exists)
+
+    query = query.limit(limit).offset(offset)
+    result = await db.execute(query)
+    sales = result.scalars().unique().all()
+
+    return [
+        SaleListItemResponse(
+            id=sale.id,
+            client_id=sale.client_id,
+            outlet_id=sale.outlet_id,
+            status=sale.status,
+            payment_method=sale.payment_method,
+            subtotal_amount=format_money(Decimal(sale.subtotal_amount)),
+            discount_amount=format_money(Decimal(sale.discount_amount)),
+            tax_amount=format_money(Decimal(sale.tax_amount)),
+            total_amount=format_money(Decimal(sale.total_amount)),
+            price_variance_flagged=_sale_line_items_flagged(sale),
+            created_at=sale.created_at,
+        )
+        for sale in sales
+    ]

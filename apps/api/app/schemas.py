@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
 
@@ -40,13 +40,18 @@ class SaleLineItemIn(BaseModel):
 
     product_id: uuid.UUID
     quantity: int = Field(gt=0)
-    unit_price: str
+    # Renamed from `unit_price` (deliberate — server-authoritative pricing
+    # spec, Ama/Nana): the old name invited treating client input as
+    # authoritative. This is the cashier-entered price; the server persists
+    # it verbatim as `sale_line_items.unit_price` but computes totals from
+    # it after cross-checking against the catalog (app/pricing.py).
+    submitted_unit_price: str
 
-    _validate_unit_price = field_validator("unit_price")(validate_money_string)
+    _validate_submitted_unit_price = field_validator("submitted_unit_price")(validate_money_string)
 
     @property
-    def unit_price_decimal(self) -> Decimal:
-        return Decimal(self.unit_price)
+    def submitted_unit_price_decimal(self) -> Decimal:
+        return Decimal(self.submitted_unit_price)
 
 
 class SaleCreateRequest(BaseModel):
@@ -56,16 +61,31 @@ class SaleCreateRequest(BaseModel):
     outlet_id: uuid.UUID
     line_items: list[SaleLineItemIn] = Field(min_length=1)
     payment_method: str | None = None
-    discount_amount: str = "0.00"
+    # Raw cashier input — server computes `discount_amount` from these, it
+    # is never accepted directly (app/pricing.py `compute_discount_amount`).
+    # `discount_value` means different things depending on `discount_type`:
+    # 0.00-100.00 (NOT money) for 'percentage', a GHS amount for 'fixed'.
+    discount_type: Literal["percentage", "fixed"] = "fixed"
+    discount_value: str = "0.00"
     tax_amount: str = "0.00"
     device_recorded_at: datetime | None = None
 
-    _validate_discount = field_validator("discount_amount")(validate_money_string)
     _validate_tax = field_validator("tax_amount")(validate_money_string)
 
+    @field_validator("discount_value")
+    @classmethod
+    def _validate_discount_value(cls, value: str, info: ValidationInfo) -> str:
+        validate_money_string(value)
+        discount_type = info.data.get("discount_type")
+        if discount_type == "percentage" and Decimal(value) > Decimal("100.00"):
+            raise ValueError(
+                "discount_value must be between 0.00 and 100.00 when discount_type is 'percentage'"
+            )
+        return value
+
     @property
-    def discount_amount_decimal(self) -> Decimal:
-        return Decimal(self.discount_amount)
+    def discount_value_decimal(self) -> Decimal:
+        return Decimal(self.discount_value)
 
     @property
     def tax_amount_decimal(self) -> Decimal:
@@ -76,9 +96,44 @@ class SaleResponse(BaseModel):
     id: uuid.UUID
     client_id: str
     status: str
+    # subtotal_amount, discount_amount, total_amount are always
+    # server-computed/recomputed (app/pricing.py) and returned here — never
+    # accepted from the client body, regardless of what the request sent.
+    subtotal_amount: str
+    discount_amount: str
+    tax_amount: str
     total_amount: str
+    # OR across line-level `price_variance_flagged` — flag only, never a
+    # rejection reason (no new error code exists for a variance).
+    price_variance_flagged: bool
     created_at: datetime
     idempotent_replay: bool
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SaleListItemResponse(BaseModel):
+    """GET /api/v1/sales list item.
+
+    Resolved ambiguity: api-contracts.md §2 documents `GET /api/v1/sales`
+    (paginated, `created_at`-ordered) but no response shape had been
+    implemented yet in this codebase before this change, and Kwame/Ama own
+    that doc (not edited here). This mirrors `SaleResponse` minus
+    `idempotent_replay` (meaningless outside a single-write response) — flag
+    for Ama/Kwame to confirm/lock in api-contracts.md.
+    """
+
+    id: uuid.UUID
+    client_id: str
+    outlet_id: uuid.UUID
+    status: str
+    payment_method: str | None
+    subtotal_amount: str
+    discount_amount: str
+    tax_amount: str
+    total_amount: str
+    price_variance_flagged: bool
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
