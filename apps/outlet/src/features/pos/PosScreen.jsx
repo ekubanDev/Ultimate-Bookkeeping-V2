@@ -6,20 +6,7 @@ import Cart from "./Cart.jsx";
 import CheckoutModal from "./CheckoutModal.jsx";
 import { useCart } from "./useCart.js";
 import { useSubmitSale } from "./useSubmitSale.js";
-
-// TODO: replace with a real product-catalog fetch once
-// GET /api/v1/products exists (not yet in
-// ultimate-bookkeeping-v2-api-contracts.md) — tracked as an open item for
-// Kwame/Efua. Prices are NUMERIC(12,2) strings per CLAUDE.md's money rule,
-// same shape a real catalog endpoint would return.
-const DEMO_PRODUCTS = [
-  { id: "prod-demo-water", name: "Sachet Water (bag)", unit_price: "5.00" },
-  { id: "prod-demo-milo", name: "Milo 400g", unit_price: "45.00" },
-  { id: "prod-demo-kalyppo", name: "Kalyppo Juice", unit_price: "8.50" },
-  { id: "prod-demo-rice", name: "Rice 5kg", unit_price: "75.00" },
-  { id: "prod-demo-oil", name: "Frytol Oil 1L", unit_price: "38.00" },
-  { id: "prod-demo-soap", name: "Key Soap", unit_price: "12.00" },
-];
+import { useProducts } from "./useProducts.js";
 
 /**
  * PosScreen — top-level POS screen.
@@ -36,6 +23,7 @@ export default function PosScreen() {
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const cart = useCart();
   const { submitSale, status } = useSubmitSale();
+  const { products, loading, error } = useProducts(profile?.outlet_id);
 
   // Admin accounts have no outlet_id — this app is for outlet managers only
   // (the admin console at /apps/admin is where cross-outlet views live, per
@@ -57,8 +45,8 @@ export default function PosScreen() {
         lineItems: cart.lineItems.map((li) => ({
           product_id: li.product_id,
           quantity: li.quantity,
-          // Catalog-only: every line item is seeded from DEMO_PRODUCTS/a
-          // real catalog fetch, never hand-typed by the cashier. Renamed
+          // Catalog-only: every line item is seeded from the real product
+          // catalog (useProducts), never hand-typed by the cashier. Renamed
           // from `unit_price` to `submitted_unit_price` per the new
           // contract — persisted verbatim server-side; the server (not
           // this client) decides whether it matches the live catalog price
@@ -96,7 +84,20 @@ export default function PosScreen() {
   return (
     <section className="ub-pos-screen">
       <h1>POS</h1>
-      <ProductGrid products={DEMO_PRODUCTS} onAddProduct={cart.addItem} />
+      {loading && <p className="ub-pos-screen__loading">Loading products...</p>}
+      {error && (
+        <p className="ub-pos-screen__error">
+          Could not load products. Check your connection and try again.
+        </p>
+      )}
+      {!loading && !error && products.length === 0 && (
+        <p className="ub-pos-screen__empty">
+          No products yet. Add products to this outlet's catalog to start selling.
+        </p>
+      )}
+      {!loading && !error && products.length > 0 && (
+        <ProductGrid products={products} onAddProduct={cart.addItem} />
+      )}
       <Cart
         lineItems={cart.lineItems}
         total={cart.total}

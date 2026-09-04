@@ -176,6 +176,37 @@ Nana's security review flagged that `total_amount` was being computed entirely f
 
 Flagging is purely observational: it never blocks, delays, discounts, or otherwise alters a sale — it only marks the line item for later human review. The admin-facing review queue that consumes `price_variance_flagged` lives in `/apps/admin` and is out of scope for this repo.
 
+### 3.8 Local queue entry states
+The Outlet app's local queue (`packages/offline-queue`) tracks each entry through the following states, persisted in IndexedDB (`QueueEntryState`, `packages/offline-queue/types.ts`):
+
+| State | Meaning |
+|---|---|
+| `queued` | Persisted, waiting for (or between retries of) dispatch. |
+| `syncing` | A dispatch attempt is in flight right now. |
+| `synced` | Server accepted the write — either a fresh insert or an idempotent replay; §3.4 treats both as success. |
+| `failed` | Server returned a non-retryable rejection (§3.4) — needs human resolution (edit-and-resubmit or explicit discard), not a silent drop. |
+| `discarded` | User explicitly abandoned a `failed` entry. Kept for audit — never hard-deleted — and excluded from all future dispatch/flush. |
+| `blocked_identity_mismatch` | Held because the currently signed-in user differs from the entry's creator — see §3.11. Never dispatched while blocked; resolves automatically. |
+
+### 3.9 Response retention
+A successful dispatch now stores the full parsed server response body on the queue entry (`last_response`), alongside the `synced` state transition and `synced_at` timestamp. Previously the response was discarded the moment dispatch resolved, which meant server-computed/returned fields that only exist once a write has actually landed — notably `price_variance_flagged` (§3.7) — were unreachable from the UI entirely, even for a write the app itself had just submitted. `last_response` is `null` until a dispatch on that entry actually succeeds.
+
+### 3.10 Retention pruning
+Nana's security review flagged that, without pruning, an outlet's entire sale/stock/expense history — amounts, categories, notes — sat indefinitely in plaintext in IndexedDB on a shared, often low-cost Android POS device, readable via DevTools by anyone with local access.
+
+Terminal entries (`synced`, `discarded`) are now pruned after a retention window, `RETENTION_WINDOW_MS` (`packages/offline-queue/index.js`, default **48 hours**), measured from the entry's terminal timestamp (`synced_at` or `discarded_at`). The window is deliberately long enough to survive a bad-connectivity stretch spanning a full weekend closure — a manager checking "did yesterday's sales sync?" the next business day still finds the evidence — while bounding how much financial history ever sits in local storage at once.
+
+Pruning runs at the end of every successful `flush()` pass and once at outlet-app startup — not on a recurring timer, to avoid competing with the event loop on low-powered shared devices for no real benefit.
+
+`queued`, `syncing`, `failed`, and `blocked_identity_mismatch` entries are **never** pruned, at any age — these represent unsynced money and must never disappear silently.
+
+### 3.11 Acting-user binding
+Each queue entry records the acting user's id at enqueue time (`created_by`, sourced from the signed-in user — never a credential or token, an attribution binding only).
+
+At dispatch time, if a *different*, positively-identified user is currently signed in on the device than the entry's `created_by`, the entry is **not** submitted — this would misattribute `created_by` server-side to the wrong person — and it is **not** silently dropped either. Instead it moves to `blocked_identity_mismatch` (§3.8) and is held, unsubmitted, until the original creator signs back in on that device, at which point it automatically returns to `queued` and rejoins the normal FIFO dispatch flow. This reconciliation check runs at the top of every `flush()` pass.
+
+An entry with no known `created_by` (e.g. the offline-queue used outside an authenticated context, or a pre-migration entry) is never subject to this check — absence of identity information never blocks a dispatch, preserving backward compatibility.
+
 ---
 
 ## 4. Open items before implementation starts

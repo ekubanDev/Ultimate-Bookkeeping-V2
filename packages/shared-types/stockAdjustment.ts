@@ -49,6 +49,8 @@ export interface StockLevel {
   product_id: string;
   outlet_id: string;
   quantity: number;
+  /** Nullable — null means "no low-stock threshold configured", not zero. */
+  min_stock: number | null;
   updated_at: string;
 }
 

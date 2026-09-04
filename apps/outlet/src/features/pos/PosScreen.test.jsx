@@ -22,9 +22,35 @@ vi.mock("../../auth/AuthContext.jsx", () => ({
   }),
 }));
 
+// PosScreen now sources the catalog from useProducts (GET /api/v1/products)
+// rather than the retired DEMO_PRODUCTS placeholder — mock the fetch hook
+// so this test exercises the same real-catalog shape without hitting
+// api-client/fetch. Same product set as the old DEMO_PRODUCTS so the
+// existing checkout-flow assertions below don't need to change.
+const MOCK_PRODUCTS = [
+  { id: "prod-demo-water", sku: null, name: "Sachet Water (bag)", unit_price: "5.00", min_stock: null },
+  { id: "prod-demo-milo", sku: "MILO400", name: "Milo 400g", unit_price: "45.00", min_stock: 10 },
+  { id: "prod-demo-kalyppo", sku: "KLYPPO", name: "Kalyppo Juice", unit_price: "8.50", min_stock: 5 },
+  { id: "prod-demo-rice", sku: "RICE5", name: "Rice 5kg", unit_price: "75.00", min_stock: 3 },
+  { id: "prod-demo-oil", sku: "OIL1L", name: "Frytol Oil 1L", unit_price: "38.00", min_stock: 5 },
+  { id: "prod-demo-soap", sku: "KEYSOAP", name: "Key Soap", unit_price: "12.00", min_stock: 10 },
+];
+
+const useProductsMock = vi.fn();
+vi.mock("./useProducts.js", () => ({
+  useProducts: (...args) => useProductsMock(...args),
+}));
+
 beforeEach(() => {
   enqueueMock.mockReset();
   enqueueMock.mockResolvedValue({ state: "queued", client_id: "mock-entry" });
+  useProductsMock.mockReset();
+  useProductsMock.mockReturnValue({
+    products: MOCK_PRODUCTS,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
 });
 
 describe("PosScreen — happy checkout path", () => {
@@ -124,5 +150,59 @@ describe("PosScreen — happy checkout path", () => {
     const [intent] = enqueueMock.mock.calls[0];
     expect(intent.payload.discount_type).toBe("fixed");
     expect(intent.payload.discount_value).toBe("5.00");
+  });
+});
+
+describe("PosScreen — product catalog sourcing (useProducts)", () => {
+  it("shows a loading message and no product tiles while the catalog fetch is in flight", () => {
+    useProductsMock.mockReturnValue({
+      products: [],
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<PosScreen />);
+
+    expect(screen.getByText(/loading products/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Rice 5kg/i })).toBeNull();
+  });
+
+  it("shows a plain error message when the catalog fetch fails", () => {
+    useProductsMock.mockReturnValue({
+      products: [],
+      loading: false,
+      error: new Error("network error"),
+      refetch: vi.fn(),
+    });
+
+    render(<PosScreen />);
+
+    expect(screen.getByText(/could not load products/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Rice 5kg/i })).toBeNull();
+  });
+
+  it("tells the manager plainly when the outlet has no products yet, rather than rendering an empty grid", () => {
+    useProductsMock.mockReturnValue({
+      products: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<PosScreen />);
+
+    expect(screen.getByText(/no products yet/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Rice 5kg/i })).toBeNull();
+  });
+
+  it("renders real catalog products from useProducts once loaded", () => {
+    render(<PosScreen />);
+
+    expect(screen.getByRole("button", { name: /Rice 5kg/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Milo 400g/i })).toBeTruthy();
+    expect(screen.queryByText(/loading products/i)).toBeNull();
+    expect(screen.queryByText(/could not load products/i)).toBeNull();
+    expect(screen.queryByText(/no products yet/i)).toBeNull();
   });
 });
