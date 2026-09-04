@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,7 @@ from app.authz import resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError
 from app.models import Product, StockLevel, StockMovement
+from app.rate_limit import READ_RATE_LIMIT, WRITE_RATE_LIMIT, limiter
 from app.schemas import StockAdjustmentRequest, StockAdjustmentResponse, StockLevelResponse
 
 router = APIRouter(prefix="/api/v1/stock", tags=["stock"])
@@ -77,7 +78,9 @@ async def _fetch_level(db: AsyncSession, product_id: uuid.UUID, outlet_id: uuid.
 
 
 @router.post("/adjustments", response_model=StockAdjustmentResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(WRITE_RATE_LIMIT)
 async def create_stock_adjustment(
+    request: Request,
     payload: StockAdjustmentRequest,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -173,7 +176,9 @@ async def create_stock_adjustment(
 
 
 @router.get("/levels", response_model=list[StockLevelResponse])
+@limiter.limit(READ_RATE_LIMIT)
 async def get_stock_levels(
+    request: Request,
     outlet_id: uuid.UUID | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -201,6 +206,7 @@ async def get_stock_levels(
             product_name=product.name,
             sku=product.sku,
             quantity=level.quantity,
+            min_stock=product.min_stock,
             updated_at=level.updated_at,
         )
         for level, product in rows

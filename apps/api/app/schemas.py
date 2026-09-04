@@ -181,7 +181,38 @@ class StockLevelResponse(BaseModel):
     product_name: str
     sku: str | None
     quantity: int
+    # Added alongside GET /api/v1/products (task spec) so the outlet app's
+    # StockLevelList can render a low-stock visual cue — previously absent,
+    # which is why Kojo had shipped that cue as a TODO. Sourced from the
+    # same `products` join `GET /levels` already performs (products.min_stock
+    # — nullable in the schema, see app/models.py Product). Needs a line in
+    # api-contracts.md §3 (Kwame/Ama's doc, not edited here).
+    min_stock: int | None
     updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductResponse(BaseModel):
+    """GET /api/v1/products — frozen contract (task spec); Kojo builds
+    against this exact shape. Not yet in api-contracts.md — flagged for
+    Kwame/Ama to add (not edited here, per convention established by
+    app/routers/me.py for the other undocumented-but-frozen endpoint).
+
+    NOTE (same caveat pattern as `MeResponse.display_name`): the task's
+    literal example response shows `min_stock` as a plain int and `sku`
+    always present, but both are nullable in the `products` table
+    (app/models.py — `sku: Text | None`, `min_stock: Integer | None`).
+    Modeled here as `| None` to match the real data instead of silently
+    coercing a NULL catalog row into `0`/`""`; flag for Kwame/Ama alongside
+    the doc addition.
+    """
+
+    id: uuid.UUID
+    sku: str | None
+    name: str
+    unit_price: str
+    min_stock: int | None
 
     model_config = ConfigDict(from_attributes=True)
 

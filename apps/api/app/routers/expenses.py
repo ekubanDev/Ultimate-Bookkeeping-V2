@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from app.authz import resolve_authorized_outlet
 from app.db import get_db
 from app.errors import format_money
 from app.models import Expense
+from app.rate_limit import WRITE_RATE_LIMIT, limiter
 from app.schemas import ExpenseCreateRequest, ExpenseResponse
 
 router = APIRouter(prefix="/api/v1/expenses", tags=["expenses"])
@@ -52,7 +53,9 @@ async def _fetch_by_client_id(db: AsyncSession, client_id: str) -> Expense | Non
 
 
 @router.post("", response_model=ExpenseResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(WRITE_RATE_LIMIT)
 async def create_expense(
+    request: Request,
     payload: ExpenseCreateRequest,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),

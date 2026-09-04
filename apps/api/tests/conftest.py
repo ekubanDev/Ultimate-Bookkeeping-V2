@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import os
+
+# Must be set BEFORE `app.main` (and therefore `app.rate_limit`) is first
+# imported anywhere in the test session — the limiter reads this exactly
+# once, at import time (see app/rate_limit.py). This is the env-flag bypass
+# the task spec calls for: the whole suite runs with the limiter disabled by
+# default so none of the existing 67 tests (or anything else) gets
+# throttled; tests/test_rate_limit.py flips `limiter.enabled` back on for
+# just its own duration to exercise the real 429 behavior.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+
 import uuid
 from decimal import Decimal
 
 import pytest_asyncio
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -81,7 +93,14 @@ async def client(session_factory, seed):
         async with session_factory() as session:
             yield session
 
-    async def override_get_current_user():
+    async def override_get_current_user(request: Request):
+        # Mirrors the `request.state.actor_id` side effect the real
+        # `get_current_user` (app/auth.py) performs, for app/rate_limit.py's
+        # per-user keying — this override bypasses the real function
+        # entirely (no DB/Firebase round trip), so it has to set that state
+        # itself or every overridden test client would silently fall back to
+        # IP-keyed rate limiting instead of the production per-user keying.
+        request.state.actor_id = str(seed["manager_id"])
         return CurrentUser(id=seed["manager_id"], role="outlet_manager", outlet_id=seed["outlet_id"])
 
     app.dependency_overrides[get_db] = override_get_db
@@ -107,7 +126,9 @@ async def admin_client(session_factory, seed):
         async with session_factory() as session:
             yield session
 
-    async def override_get_current_user():
+    async def override_get_current_user(request: Request):
+        # See `client`'s override above for why this sets actor_id itself.
+        request.state.actor_id = str(seed["admin_id"])
         return CurrentUser(id=seed["admin_id"], role="admin", outlet_id=None)
 
     app.dependency_overrides[get_db] = override_get_db

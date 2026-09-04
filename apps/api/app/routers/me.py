@@ -13,20 +13,23 @@ api-contracts.md §1), so the client has to ask the server.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
 from app.db import get_db
 from app.models import User
+from app.rate_limit import AUTH_RATE_LIMIT, limiter
 from app.schemas import MeResponse
 
 router = APIRouter(prefix="/api/v1", tags=["me"])
 
 
 @router.get("/me", response_model=MeResponse)
+@limiter.limit(AUTH_RATE_LIMIT)
 async def get_me(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> MeResponse:

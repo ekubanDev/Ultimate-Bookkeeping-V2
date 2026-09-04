@@ -33,7 +33,7 @@ import os
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, status
+from fastapi import Depends, Header, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -126,6 +126,7 @@ class CurrentUser:
 
 
 async def get_current_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> CurrentUser:
@@ -159,6 +160,13 @@ async def get_current_user(
             retryable=False,
             status_code=status.HTTP_403_FORBIDDEN,
         )
+
+    # Rate-limit keying (app/rate_limit.py): set as soon as we have a real
+    # `users.id`, even for a disabled account below — a disabled-account
+    # retry storm should be bucketed per-account, not dog-piled onto a
+    # shared IP bucket with every other device behind the same NAT. Never
+    # set from unverified token claims, only from this authenticated row.
+    request.state.actor_id = str(user.id)
 
     # Revocation path (Nana's finding, high severity): a disabled account
     # must be rejected here, on the same users row we already fetched — no

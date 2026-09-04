@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,7 @@ from app.db import get_db
 from app.errors import AppError, format_money
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement
 from app.pricing import LineItemInput, compute_sale_totals
+from app.rate_limit import READ_RATE_LIMIT, WRITE_RATE_LIMIT, limiter
 from app.schemas import SaleCreateRequest, SaleListItemResponse, SaleResponse
 
 router = APIRouter(prefix="/api/v1/sales", tags=["sales"])
@@ -69,7 +70,9 @@ async def _fetch_by_client_id(db: AsyncSession, client_id: str) -> Sale | None:
 
 
 @router.post("", response_model=SaleResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(WRITE_RATE_LIMIT)
 async def create_sale(
+    request: Request,
     payload: SaleCreateRequest,
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -234,7 +237,9 @@ async def create_sale(
 
 
 @router.get("", response_model=list[SaleListItemResponse])
+@limiter.limit(READ_RATE_LIMIT)
 async def list_sales(
+    request: Request,
     outlet_id: uuid.UUID | None = Query(default=None),
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = Query(default=None),

@@ -239,7 +239,41 @@ async def test_get_stock_levels_returns_cache_contents(client):
     assert row["quantity"] == 10
     assert row["sku"] == "SKU1"
     assert row["product_name"] == "Widget"
+    # Added alongside GET /api/v1/products so the outlet app's
+    # StockLevelList can render a low-stock cue (task spec) — seeded product
+    # has min_stock=1 (tests/conftest.py).
+    assert row["min_stock"] == 1
     assert "updated_at" in row
+
+
+async def test_get_stock_levels_min_stock_is_null_when_product_has_none(client):
+    """products.min_stock is nullable (app/models.py) — GET /levels must
+    surface that as JSON null, not coerce it to 0."""
+    seed = client.seed
+    new_product_id = uuid.uuid4()
+    async with client.session_factory() as session:
+        session.add(
+            Product(
+                id=new_product_id,
+                admin_id=seed["admin_id"],
+                sku="SKU-NO-MIN",
+                name="No Min Stock Product",
+                unit_price="5.00",
+                # min_stock intentionally omitted -> None
+            )
+        )
+        await session.commit()
+
+    await client.post(
+        "/api/v1/stock/adjustments",
+        json=_adjustment_payload(seed, client_id="adj-no-min", delta=3, reason="restock")
+        | {"product_id": str(new_product_id)},
+    )
+
+    resp = await client.get("/api/v1/stock/levels", params={"outlet_id": str(seed["outlet_id"])})
+    assert resp.status_code == 200
+    row = next(r for r in resp.json() if r["product_id"] == str(new_product_id))
+    assert row["min_stock"] is None
 
 
 async def test_get_stock_levels_reflects_adjustments(client):
