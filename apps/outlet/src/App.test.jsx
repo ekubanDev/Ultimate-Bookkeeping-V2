@@ -37,6 +37,18 @@ vi.mock("./auth/AuthContext.jsx", () => ({
   useAuth: () => useAuthMock(),
 }));
 
+// UpdatePrompt.jsx registers the service worker via
+// `virtual:pwa-register/react` — a build-time virtual module supplied by
+// vite-plugin-pwa's Vite plugin, which vitest's config deliberately does
+// NOT install (see vite.config.js's SERVICE WORKER note and
+// updatePromptMachine.test.js/apiCacheRoutes.test.js for where that logic
+// *is* covered). Stub the component itself here, the same way
+// @ub/offline-queue and AuthContext are stubbed above, so this file keeps
+// testing only what it owns: the auth-status gate.
+vi.mock("./pwa/UpdatePrompt.jsx", () => ({
+  default: () => null,
+}));
+
 beforeEach(() => {
   useAuthMock.mockReset();
   enqueueMock.mockReset();

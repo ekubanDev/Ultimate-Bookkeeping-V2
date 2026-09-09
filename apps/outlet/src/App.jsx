@@ -1,13 +1,18 @@
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { onReconnect, pruneStaleEntries } from "@ub/offline-queue";
 import { useAuth } from "./auth/AuthContext.jsx";
 import LoginScreen from "./auth/LoginScreen.jsx";
 import OutletNav from "./navigation/OutletNav.jsx";
 import PosScreen from "./features/pos/PosScreen.jsx";
-import StockScreen from "./features/stock/StockScreen.jsx";
-import ExpensesScreen from "./features/expenses/ExpensesScreen.jsx";
 import SyncBanner from "./features/sync-status/SyncBanner.jsx";
+import UpdatePrompt from "./pwa/UpdatePrompt.jsx";
+
+// Stock/Expenses are route-split (see the ROUTE-SPLITTING NOTE below) —
+// POS stays a static top-level import since it's the screen a cashier
+// lands on, and must never depend on a lazy chunk fetch succeeding.
+const StockScreen = lazy(() => import("./features/stock/StockScreen.jsx"));
+const ExpensesScreen = lazy(() => import("./features/expenses/ExpensesScreen.jsx"));
 
 /**
  * App — top-level shell for the Outlet app.
@@ -26,21 +31,35 @@ import SyncBanner from "./features/sync-status/SyncBanner.jsx";
  * calls onReconnect() once so the 'online' -> flush() wiring is live for
  * the whole app session. Does NOT own: what "signed in" means — that's
  * AuthProvider's job (see src/auth/AuthContext.jsx); this component only
- * reads `status` and picks what to render.
+ * reads `status` and picks what to render. Does NOT own: service-worker
+ * registration or the update-prompt state machine — see
+ * src/pwa/UpdatePrompt.jsx; App.jsx just mounts it once, outside the auth
+ * gate.
  *
- * BUNDLE-SIZE NOTE (Kojo, 2026-09): PosScreen/StockScreen/ExpensesScreen
- * are deliberately NOT React.lazy-split here, even though POS is the only
- * screen a cashier sees on landing. Stock and Expenses are two of this
- * app's three offline-eligible write paths (CLAUDE.md — sales, stock
- * adjustments, expenses), and this repo has no service worker/PWA caching
- * yet (deferred per ultimate-bookkeeping-v2-outlet-ui-plan.md §4). Without
- * that caching layer, a lazily-loaded screen chunk that was never fetched
- * before the user went offline would fail to load exactly when they try to
- * record a stock adjustment or expense offline — trading bundle KB for a
- * broken offline promise. Route-splitting these two screens only saves
- * ~6KB raw (~2% of the bundle) anyway, per the bundle report, so it isn't
- * worth that risk. Revisit once PWA caching lands. See firebase.js /
- * AuthContext.jsx for the deferred-loading change that *was* safe to make.
+ * ROUTE-SPLITTING NOTE (Kojo, 2026-09 — revised): StockScreen/ExpensesScreen
+ * are now React.lazy-split. Previously (see git history on this file) they
+ * were deliberately kept as static imports specifically because this repo
+ * had no service worker: a lazily-loaded chunk that was never fetched
+ * before the user went offline would fail to load exactly when they tried
+ * to record a stock adjustment or expense offline. vite.config.js's
+ * `workbox.globPatterns` now precaches every build output chunk — including
+ * these two lazy chunks — at SW-install time, alongside the shell, so once
+ * install completes they're served from Cache Storage offline exactly like
+ * the eagerly-bundled code was before. That's what changed and why this is
+ * safe now.
+ *
+ * Residual hole, reported rather than silently accepted: the very first
+ * visit to this app, before the service worker has finished installing
+ * (which requires fetching every precached file over the network — real
+ * time on a "cheap Android device with intermittent connectivity"), has NO
+ * offline protection yet for *anything*, split or not — a reload in that
+ * narrow window fails exactly as it would with zero PWA support. This is
+ * not specific to route-splitting: it's the same gap the app shell itself
+ * has on a first cold visit. Splitting Stock/Expenses doesn't widen that
+ * window or add a new one on top of it — once precache install succeeds
+ * (same moment the shell itself becomes reload-safe), the split chunks are
+ * exactly as safe as the shell. See the outlet build report in the task
+ * writeup for the measured bundle-size effect of this split.
  */
 export default function App() {
   const { status, error } = useAuth();
@@ -64,47 +83,64 @@ export default function App() {
 
   if (status === "loading") {
     return (
-      <main className="ub-app-splash">
-        <p>Loading...</p>
-      </main>
+      <>
+        <UpdatePrompt />
+        <main className="ub-app-splash">
+          <p>Loading...</p>
+        </main>
+      </>
     );
   }
 
   if (status === "unconfigured") {
     return (
-      <main className="ub-app-message">
-        <h1>Auth not configured</h1>
-        <p>
-          This app doesn't have Firebase auth configured. Set the VITE_FIREBASE_* env vars
-          (see apps/outlet/.env.example) and reload.
-        </p>
-      </main>
+      <>
+        <UpdatePrompt />
+        <main className="ub-app-message">
+          <h1>Auth not configured</h1>
+          <p>
+            This app doesn't have Firebase auth configured. Set the VITE_FIREBASE_* env vars
+            (see apps/outlet/.env.example) and reload.
+          </p>
+        </main>
+      </>
     );
   }
 
   if (status === "unprovisioned") {
     return (
-      <main className="ub-app-message">
-        <h1>Account not set up</h1>
-        <p>{error}</p>
-      </main>
+      <>
+        <UpdatePrompt />
+        <main className="ub-app-message">
+          <h1>Account not set up</h1>
+          <p>{error}</p>
+        </main>
+      </>
     );
   }
 
   if (status === "signed_out") {
-    return <LoginScreen />;
+    return (
+      <>
+        <UpdatePrompt />
+        <LoginScreen />
+      </>
+    );
   }
 
   return (
     <BrowserRouter>
+      <UpdatePrompt />
       <SyncBanner />
       <main className="ub-app-content">
-        <Routes>
-          <Route path="/" element={<Navigate to="/pos" replace />} />
-          <Route path="/pos" element={<PosScreen />} />
-          <Route path="/stock" element={<StockScreen />} />
-          <Route path="/expenses" element={<ExpensesScreen />} />
-        </Routes>
+        <Suspense fallback={<p className="ub-app-route-loading">Loading…</p>}>
+          <Routes>
+            <Route path="/" element={<Navigate to="/pos" replace />} />
+            <Route path="/pos" element={<PosScreen />} />
+            <Route path="/stock" element={<StockScreen />} />
+            <Route path="/expenses" element={<ExpensesScreen />} />
+          </Routes>
+        </Suspense>
       </main>
       <OutletNav />
     </BrowserRouter>

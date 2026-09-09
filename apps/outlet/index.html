@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Installability (manifest link itself is injected automatically by
+         vite-plugin-pwa at build time — see vite.config.js). theme-color
+         tints the Android status bar / task switcher to match the
+         manifest's theme_color; apple-touch-icon covers iOS home-screen
+         add, which doesn't read manifest.webmanifest icons. Cheap to add
+         now per the task's PWA pass; doesn't commit to the later
+         Capacitor/PWA wrapper step. -->
+    <meta name="theme-color" content="#1e1b4b" />
+    <link rel="apple-touch-icon" href="/pwa-192.png" />
     <title>Ultimate Bookkeeping — Outlet</title>
   </head>
   <body>
