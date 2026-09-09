@@ -27,6 +27,10 @@ vi.mock("@ub/offline-queue", () => ({
   // entries (see App.jsx's pruneStaleEntries effect) — not this test's
   // concern (offline-queue's own tests cover pruning behavior), so stub it.
   pruneStaleEntries: () => Promise.resolve({ prunedCount: 0 }),
+  // App.jsx also calls this once at startup to un-strand any 'syncing'
+  // entries left behind by a crash (Adjoa QA bug #3) — same reasoning as
+  // pruneStaleEntries above, covered by offline-queue's own tests.
+  reconcileStaleSyncing: () => Promise.resolve(),
 }));
 
 // App's rendering decision is entirely a function of useAuth()'s status —
@@ -93,5 +97,24 @@ describe("App — auth status gate", () => {
     // Default route redirects to /pos.
     expect(screen.getByRole("heading", { name: /^pos$/i })).toBeTruthy();
     expect(screen.getByRole("link", { name: /stock/i })).toBeTruthy();
+    // The resolve-failed-entries flow (Adjoa QA bug #2 fix — see
+    // SyncResolutionScreen.jsx) is reachable from the bottom nav.
+    expect(screen.getByRole("link", { name: /sync/i })).toBeTruthy();
+  });
+
+  // Offline-relaunch lockout fix (Adjoa QA bug #1, AuthContext.jsx): the app
+  // must keep working — not silently pretend to be fully normal — when
+  // booted from a cached profile because /me couldn't be reached.
+  it("renders the nav/screens AND a visible degraded-mode banner when status is 'signed_in_degraded'", () => {
+    useAuthMock.mockReturnValue({
+      status: "signed_in_degraded",
+      profile: { id: "user-1", role: "outlet_manager", outlet_id: "outlet-1", display_name: "Test Manager" },
+      error: "You're offline — working from your last signed-in account details. Some info may be out of date until you reconnect.",
+    });
+    render(<App />);
+    // The cashier can still work — the app renders normally, not a splash/lockout.
+    expect(screen.getByRole("heading", { name: /^pos$/i })).toBeTruthy();
+    // But it's never silent about the degraded state.
+    expect(screen.getByText(/last signed-in account details/i)).toBeTruthy();
   });
 });

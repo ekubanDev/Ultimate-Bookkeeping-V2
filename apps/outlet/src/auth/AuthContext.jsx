@@ -2,20 +2,62 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { getMe, setTokenProvider, ApiClientError } from "@ub/api-client";
 import { setCurrentUserProvider, flush } from "@ub/offline-queue";
 import { loadFirebaseAuth, isFirebaseConfigured } from "./firebase.js";
+import { cacheProfile, readCachedProfile, clearCachedProfile } from "./profileCache.js";
 
 /**
  * AuthContext — the single source of truth for "who is signed in, and what
  * does the backend say about them" for the whole Outlet app.
  *
  * Status machine (per the task brief):
- *   'unconfigured'   — VITE_FIREBASE_* env vars absent; SDK never touched.
- *   'loading'        — Firebase's onAuthStateChanged hasn't fired yet, or a
- *                       Firebase user exists and /me is in flight.
- *   'signed_out'      — no Firebase user.
- *   'signed_in'       — Firebase user + /me both resolved successfully.
- *   'unprovisioned'   — Firebase user exists, but /me returned
- *                       USER_NOT_PROVISIONED (403) — the account has no
- *                       corresponding `users` row yet.
+ *   'unconfigured'        — VITE_FIREBASE_* env vars absent; SDK never touched.
+ *   'loading'             — Firebase's onAuthStateChanged hasn't fired yet, or
+ *                           a Firebase user exists and /me is in flight (with
+ *                           no usable cached profile to fall back on yet).
+ *   'signed_out'          — no Firebase user, OR a Firebase user exists but
+ *                           /me came back with a confirmed rejection (a real
+ *                           HTTP response, not a network failure) and there's
+ *                           no cached profile to degrade into.
+ *   'signed_in'           — Firebase user + /me both resolved successfully.
+ *   'signed_in_degraded'  — Firebase user exists, /me could not be reached
+ *                           (network failure — see deriveAuthState below),
+ *                           but a previously-cached profile for this uid
+ *                           exists, so the app boots into a working-but-stale
+ *                           state rather than locking the cashier out. See
+ *                           "OFFLINE-RELAUNCH LOCKOUT FIX" below.
+ *   'unprovisioned'        — Firebase user exists, but /me returned
+ *                           USER_NOT_PROVISIONED (403) — the account has no
+ *                           corresponding `users` row yet.
+ *
+ * OFFLINE-RELAUNCH LOCKOUT FIX (Kojo, 2026-09 — Adjoa QA bug #1): this app's
+ * entire reason for existing is "a sale can never fail to record", including
+ * right after a crash/force-quit/low-memory kill on a cheap Android device —
+ * routine on this hardware. Before this fix, ANY /me failure (including a
+ * plain network error, which is exactly what happens when Firebase restores
+ * a session on relaunch while offline) collapsed to 'signed_out', dropping a
+ * legitimately signed-in cashier at LoginScreen — which they also can't use
+ * offline. That's total lockout in exactly the conditions this product
+ * exists for.
+ *
+ * The fix distinguishes "confirmed signed out / rejected" (a real HTTP
+ * response from /me — see meResultFromError: an ApiClientError has a
+ * `code`) from "don't know — /me couldn't be reached at all" (no `code`:
+ * `fetch` itself rejected, e.g. offline/DNS/timeout). Only the latter, when
+ * we have a locally-cached last-known-good profile for this Firebase uid
+ * (persisted via profileCache.js every time /me previously succeeded),
+ * degrades into 'signed_in_degraded' instead of 'signed_out'. This is a UX
+ * continuity aid ONLY, never an authorization decision:
+ *   - No token is ever cached — @ub/api-client's token provider still calls
+ *     `firebaseUser.getIdToken()` fresh at every dispatch (see the
+ *     useEffect below), cached-profile or not.
+ *   - A stale cached `outlet_id` can't be used to write into another outlet
+ *     even if this cache were tampered with: the backend resolves
+ *     `outlet_id` for an `outlet_manager` from the verified auth context
+ *     server-side and ignores any client-supplied value (see
+ *     apps/api/app/authz.py's `resolve_authorized_outlet`, verified
+ *     directly against the routers that call it).
+ *   - It's never silent: App.jsx surfaces 'signed_in_degraded' with a
+ *     visible "working from your last signed-in account details" banner
+ *     rather than pretending everything is normal.
  *
  * Owns: the onAuthStateChanged effect, calling /me, registering the
  * api-client token provider. Derivation of "given a firebase user + a /me
@@ -56,14 +98,31 @@ const AuthContext = createContext(null);
 
 /**
  * deriveAuthState — pure. Given the outcome of fetching /me for a signed-in
- * Firebase user, decides the resulting {status, profile, error}. Kept
- * separate from the async /me call itself so it's unit-testable with plain
- * objects, no mocking required.
+ * Firebase user (and, optionally, a locally-cached last-known-good profile
+ * for that same uid — see profileCache.js), decides the resulting
+ * {status, profile, error}. Kept separate from the async /me call itself so
+ * it's unit-testable with plain objects, no mocking required.
+ *
+ * The key distinction (see the OFFLINE-RELAUNCH LOCKOUT FIX note above):
+ *   - `meResult.code` present            -> a real HTTP response came back
+ *                                            from /me. A confirmed rejection
+ *                                            (USER_NOT_PROVISIONED, or
+ *                                            anything else) is decisive —
+ *                                            never overridden by a cache.
+ *   - `meResult.code` absent, `ok: false` -> /me could not be reached at all
+ *                                            (network failure — see
+ *                                            meResultFromError). We do NOT
+ *                                            know the account is invalid; if
+ *                                            `cachedProfile` is available,
+ *                                            degrade rather than lock out.
  *
  * @param {{ ok: true, profile: object } | { ok: false, code?: string, message?: string }} meResult
- * @returns {{ status: 'signed_in'|'unprovisioned', profile: object|null, error: string|null }}
+ * @param {object|null} [cachedProfile] last-known-good `/me` response for
+ *   this uid, from profileCache.readCachedProfile(uid)?.profile — only
+ *   consulted when meResult is a network-failure-shaped rejection (no code).
+ * @returns {{ status: 'signed_in'|'signed_in_degraded'|'unprovisioned'|'signed_out', profile: object|null, error: string|null }}
  */
-export function deriveAuthState(meResult) {
+export function deriveAuthState(meResult, cachedProfile = null) {
   if (meResult.ok) {
     return { status: "signed_in", profile: meResult.profile, error: null };
   }
@@ -73,6 +132,31 @@ export function deriveAuthState(meResult) {
       status: "unprovisioned",
       profile: null,
       error: "Your account isn't set up yet — ask your admin to set up your account.",
+    };
+  }
+
+  if (meResult.code) {
+    // A real, decisive rejection from the server (401 stale token rejected,
+    // 500 the server itself is broken, etc.) — we WERE able to reach it, so
+    // a cached profile never overrides this. Matches pre-fix behavior.
+    return {
+      status: "signed_out",
+      profile: null,
+      error: meResult.message || "Could not load your account. Please try signing in again.",
+    };
+  }
+
+  if (cachedProfile) {
+    // No `code` means /me itself couldn't be reached (network error/offline)
+    // — not a confirmed rejection. A Firebase session was restored, so boot
+    // into a degraded-but-working state on the last-known profile instead of
+    // dropping a legitimately signed-in cashier at a LoginScreen they also
+    // can't use offline.
+    return {
+      status: "signed_in_degraded",
+      profile: cachedProfile,
+      error:
+        "You're offline — working from your last signed-in account details. Some info may be out of date until you reconnect.",
     };
   }
 
@@ -163,8 +247,16 @@ export function AuthProvider({ children }) {
         setState({ status: "loading", profile: null, error: null });
 
         getMe()
-          .then((profile) => deriveAuthState({ ok: true, profile }))
-          .catch((err) => deriveAuthState(meResultFromError(err)))
+          .then((profile) => {
+            // Persist on every success — this is what makes the degraded
+            // path above possible on a LATER offline relaunch. Never
+            // persisted: any token/credential (see profileCache.js).
+            cacheProfile(user.uid, profile);
+            return deriveAuthState({ ok: true, profile });
+          })
+          .catch((err) =>
+            deriveAuthState(meResultFromError(err), readCachedProfile(user.uid)?.profile ?? null)
+          )
           .then(setState);
       });
     });
@@ -187,8 +279,17 @@ export function AuthProvider({ children }) {
   const signOut = useCallback(async () => {
     if (!isFirebaseConfigured) return;
     const { auth, authSdk } = await loadFirebaseAuth();
+    // Explicit sign-out is a deliberate "I'm done on this device" signal —
+    // clear the cached profile so a different cashier signing in next on
+    // this shared device never sees a stale fallback for someone else's
+    // account (the degraded path above only ever consults the cache for the
+    // uid Firebase itself currently reports as signed in, but there's no
+    // reason to keep it around past an explicit sign-out either).
+    if (firebaseUser) {
+      clearCachedProfile(firebaseUser.uid);
+    }
     await authSdk.signOut(auth);
-  }, []);
+  }, [firebaseUser]);
 
   const value = useMemo(
     () => ({

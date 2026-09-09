@@ -66,13 +66,45 @@ export async function apiFetch(path, init) {
   const body = await res.json().catch(() => null);
 
   if (!res.ok) {
-    const envelope = body && body.error
-      ? body.error
-      : { code: "UNKNOWN_ERROR", message: "Request failed", retryable: false };
+    const envelope = body && body.error ? body.error : envelopeForUnparsedError(res.status);
     throw new ApiClientError(envelope, res.status);
   }
 
   return body;
+}
+
+/**
+ * Builds the fallback error envelope for a non-2xx response with no
+ * parseable `{ error: {...} }` body — exactly what a bare 500 looks like
+ * (apps/api/app/main.py has no catch-all exception handler that would wrap
+ * an unhandled exception in the standard envelope), and what any other
+ * infra failure in front of the API (a proxy timeout, a misconfigured LB
+ * health-check response) tends to look like too.
+ *
+ * retryable is chosen from the HTTP status class alone, since that's all we
+ * have without an envelope:
+ *   - 5xx: the SERVER failed (or something in front of it did) — the
+ *     request itself was plausibly fine. Treat as retryable so it re-enters
+ *     the normal queued/backoff path (@ub/offline-queue's dispatchEntry)
+ *     instead of landing in 'failed' un-actionably. Without this, an
+ *     unrelated backend 500 permanently strands a real, valid sale as
+ *     unretryable — the client can't fix a 500 by resubmitting the same
+ *     request differently, but the SERVER might recover, and a client_id
+ *     retry is always safe (idempotency contract — design doc §3.3).
+ *   - 4xx (and anything else, e.g. a malformed 3xx): the request itself was
+ *     rejected — retrying the identical payload is expected to fail the
+ *     same way again. Non-retryable, matching the pre-existing default.
+ *
+ * @param {number} status
+ * @returns {{ code: string, message: string, retryable: boolean }}
+ */
+function envelopeForUnparsedError(status) {
+  const isServerError = status >= 500 && status < 600;
+  return {
+    code: "UNKNOWN_ERROR",
+    message: "Request failed",
+    retryable: isServerError,
+  };
 }
 
 /** Error thrown by apiFetch for any non-2xx response. */

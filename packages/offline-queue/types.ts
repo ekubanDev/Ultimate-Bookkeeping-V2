@@ -23,7 +23,9 @@ export interface Intent<TPayload = unknown> {
  * useSyncStatus/SyncBanner.
  *
  *  - queued:    persisted, waiting for (or between retries of) dispatch.
- *  - syncing:   a dispatch attempt is in flight right now.
+ *  - syncing:   a dispatch attempt is in flight right now (or was, until a
+ *               crash stranded it — see `syncing_since` below and
+ *               index.js#reconcileStaleSyncing, which self-heals that case).
  *  - synced:    server accepted the write — either a fresh insert or an
  *               idempotent replay (design doc §3.4 treats both as success).
  *  - failed:    server returned a non-retryable rejection (design doc §3.4)
@@ -102,6 +104,16 @@ export interface QueueEntry<TPayload = unknown, TResponse = unknown> {
    * doesn't change it, just makes FIFO deterministic.
    */
   seq: number;
+  /**
+   * epoch ms — heartbeat stamped by index.js#dispatchEntry the moment an
+   * entry transitions to 'syncing', cleared (null) on every transition away
+   * from it. Used by index.js#reconcileStaleSyncing to distinguish an
+   * entry stranded in 'syncing' by a crash (heartbeat older than
+   * STALE_SYNCING_MS) from one genuinely still in flight, most plausibly in
+   * another open tab of this same origin. Always null outside the 'syncing'
+   * state.
+   */
+  syncing_since: number | null;
 }
 
 /** Aggregate view used by useSyncStatus to drive SyncBanner without polling. */

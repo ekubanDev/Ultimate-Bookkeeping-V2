@@ -25,8 +25,10 @@ const {
   getQueueSnapshot,
   subscribe,
   pruneStaleEntries,
+  reconcileStaleSyncing,
   setCurrentUserProvider,
   RETENTION_WINDOW_MS,
+  STALE_SYNCING_MS,
 } = await import("../index.js");
 
 /** @returns {{client_id: string, type: 'sale', payload: object}} */
@@ -556,6 +558,167 @@ describe("pruneStaleEntries", () => {
     await flush();
 
     expect(await getEntry(stale)).toBeNull();
+  });
+});
+
+describe("reconcileStaleSyncing (Adjoa QA bug #3 — entries stranded in 'syncing' after a crash)", () => {
+  let seedSeq = 3000;
+
+  /**
+   * Seeds an entry directly via db.js, bypassing enqueue/dispatchEntry —
+   * this is what "the app crashed between dispatchEntry's write-first
+   * `state:'syncing'` persist and the network call resolving" looks like on
+   * disk: an entry in 'syncing' with nothing further ever updating it.
+   */
+  function seedSyncingEntry(clientId, overrides = {}) {
+    return putEntry({
+      client_id: clientId,
+      type: "sale",
+      payload: buildSaleIntent(clientId).payload,
+      state: "syncing",
+      attempts: 0,
+      last_error: null,
+      enqueued_at: Date.now(),
+      synced_at: null,
+      discarded_at: null,
+      last_response: null,
+      created_by: null,
+      seq: seedSeq++,
+      syncing_since: Date.now(),
+      ...overrides,
+    });
+  }
+
+  it("returns a 'syncing' entry whose heartbeat is older than STALE_SYNCING_MS to 'queued'", async () => {
+    const now = Date.now();
+    const clientId = generateClientId();
+    await seedSyncingEntry(clientId, { syncing_since: now - STALE_SYNCING_MS - 1 });
+
+    await reconcileStaleSyncing({ now });
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("queued");
+    expect(entry.syncing_since).toBeNull();
+  });
+
+  it("leaves a recently-stamped 'syncing' entry alone — does not resurrect a dispatch genuinely still in flight", async () => {
+    const now = Date.now();
+    const clientId = generateClientId();
+    await seedSyncingEntry(clientId, { syncing_since: now - 1000 });
+
+    await reconcileStaleSyncing({ now });
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("syncing");
+  });
+
+  it("treats a 'syncing' entry with no heartbeat at all as stale (defensive)", async () => {
+    const clientId = generateClientId();
+    await seedSyncingEntry(clientId, { syncing_since: null });
+
+    await reconcileStaleSyncing();
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("queued");
+  });
+
+  it("a reconciled entry is picked up and dispatched on the very next flush() pass — re-dispatch collapses into an idempotent replay server-side, never a duplicate", async () => {
+    const now = Date.now();
+    const clientId = generateClientId();
+    await seedSyncingEntry(clientId, { syncing_since: now - STALE_SYNCING_MS - 1 });
+    postSaleMock.mockResolvedValueOnce(saleResponse(clientId, /* replay */ true));
+
+    await flush();
+
+    expect(postSaleMock).toHaveBeenCalledTimes(1);
+    expect(postSaleMock.mock.calls[0][0].client_id).toBe(clientId);
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("synced");
+  });
+
+  it("does nothing to entries in any other state", async () => {
+    const now = Date.now();
+    const queuedId = generateClientId();
+    const failedId = generateClientId();
+    await putEntry({
+      client_id: queuedId,
+      type: "sale",
+      payload: buildSaleIntent(queuedId).payload,
+      state: "queued",
+      attempts: 0,
+      last_error: null,
+      enqueued_at: now,
+      synced_at: null,
+      discarded_at: null,
+      last_response: null,
+      created_by: null,
+      seq: seedSeq++,
+      syncing_since: null,
+    });
+    await putEntry({
+      client_id: failedId,
+      type: "sale",
+      payload: buildSaleIntent(failedId).payload,
+      state: "failed",
+      attempts: 1,
+      last_error: { code: "X", message: "x", retryable: false },
+      enqueued_at: now,
+      synced_at: null,
+      discarded_at: null,
+      last_response: null,
+      created_by: null,
+      seq: seedSeq++,
+      syncing_since: null,
+    });
+
+    await reconcileStaleSyncing({ now: now + STALE_SYNCING_MS * 10 });
+
+    expect((await getEntry(queuedId)).state).toBe("queued");
+    expect((await getEntry(failedId)).state).toBe("failed");
+  });
+});
+
+describe("dispatchEntry's syncing_since heartbeat", () => {
+  it("is stamped on the 'syncing' transition and cleared again on success", async () => {
+    const clientId = generateClientId();
+    let sawHeartbeatWhileSyncing = null;
+    postSaleMock.mockImplementation(async (payload) => {
+      sawHeartbeatWhileSyncing = (await getEntry(payload.client_id)).syncing_since;
+      return saleResponse(payload.client_id);
+    });
+
+    await enqueue(buildSaleIntent(clientId));
+    await flush();
+
+    expect(sawHeartbeatWhileSyncing).not.toBeNull();
+    expect(typeof sawHeartbeatWhileSyncing).toBe("number");
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("synced");
+    expect(entry.syncing_since).toBeNull();
+  });
+
+  it("is cleared again after a retryable failure requeues the entry", async () => {
+    const clientId = generateClientId();
+    postSaleMock.mockRejectedValueOnce(retryableError());
+
+    await enqueue(buildSaleIntent(clientId));
+    await flush();
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("queued");
+    expect(entry.syncing_since).toBeNull();
+  });
+
+  it("is cleared again after a non-retryable failure moves the entry to failed", async () => {
+    const clientId = generateClientId();
+    postSaleMock.mockRejectedValueOnce(nonRetryableError());
+
+    await enqueue(buildSaleIntent(clientId));
+    await flush();
+
+    const entry = await getEntry(clientId);
+    expect(entry.state).toBe("failed");
+    expect(entry.syncing_since).toBeNull();
   });
 });
 

@@ -19,6 +19,9 @@ export default function OutletNav() {
       <NavLink to="/expenses" className="ub-outlet-nav__item">
         Expenses
       </NavLink>
+      <NavLink to="/sync" className="ub-outlet-nav__item">
+        Sync
+      </NavLink>
     </nav>
   );
 }

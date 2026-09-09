@@ -47,6 +47,19 @@ const BACKOFF_CAP_MS = 60_000;
  */
 export const RETENTION_WINDOW_MS = 48 * 60 * 60 * 1000;
 
+/**
+ * Staleness threshold for a 'syncing' entry — see reconcileStaleSyncing()
+ * below (Adjoa QA bug #3). Long enough to (almost) never mistake a
+ * dispatch genuinely still in flight in ANOTHER open tab of this same
+ * origin (sharing the same IndexedDB — a single tab's own flush() loop is
+ * already sequential/re-entrant-safe, so that's not a risk within one tab)
+ * for one abandoned by a crash; short enough that a crash between
+ * dispatchEntry persisting 'syncing' and the network call resolving
+ * doesn't leave a sale showing "syncing…" forever. Exported so it's
+ * tunable, same rationale as RETENTION_WINDOW_MS.
+ */
+export const STALE_SYNCING_MS = 2 * 60 * 1000;
+
 let seqCounter = 0;
 function nextSeq() {
   seqCounter += 1;
@@ -199,6 +212,10 @@ export async function enqueue(intent, options = {}) {
     last_response: null,
     created_by: options.createdBy ?? null,
     seq: nextSeq(),
+    // Heartbeat stamped by dispatchEntry on the 'syncing' transition, used
+    // by reconcileStaleSyncing() (Adjoa QA bug #3) to tell a crashed
+    // in-flight attempt from one genuinely still running.
+    syncing_since: null,
   };
 
   await persistAndNotify(entry);
@@ -258,13 +275,22 @@ async function dispatchEntry(entry) {
             "This entry was recorded by a different user than the one currently signed in. It will sync automatically once that user signs back in.",
           retryable: false,
         },
+        syncing_since: null,
       };
       await persistAndNotify(blocked);
       return blocked;
     }
   }
 
-  await persistAndNotify({ ...entry, state: "syncing" });
+  // syncing_since: the heartbeat reconcileStaleSyncing() (Adjoa QA bug #3)
+  // uses to tell a crashed in-flight attempt from one still genuinely
+  // running. Stamped here, BEFORE the network call below — if the app is
+  // killed between this line and the dispatch() call/response, the entry is
+  // left in 'syncing' with a heartbeat that ages past STALE_SYNCING_MS, and
+  // reconcileStaleSyncing() returns it to 'queued' on a later flush()/app
+  // startup so it's never stranded. Cleared (set back to null) on every
+  // transition away from 'syncing' below.
+  await persistAndNotify({ ...entry, state: "syncing", syncing_since: Date.now() });
 
   const dispatch = DISPATCHERS[entry.type];
 
@@ -280,6 +306,7 @@ async function dispatchEntry(entry) {
       last_error: null,
       synced_at: Date.now(),
       last_response: response ?? null,
+      syncing_since: null,
     };
     await persistAndNotify(synced);
     return synced;
@@ -293,6 +320,7 @@ async function dispatchEntry(entry) {
         state: "queued",
         attempts,
         last_error: structuredError,
+        syncing_since: null,
       };
       await persistAndNotify(requeued);
       scheduleRetry(requeued);
@@ -304,6 +332,7 @@ async function dispatchEntry(entry) {
       state: "failed",
       attempts,
       last_error: structuredError,
+      syncing_since: null,
     };
     await persistAndNotify(failed);
     return failed;
@@ -350,6 +379,69 @@ async function reconcileIdentityBlocks() {
   );
   for (const entry of toUnblock) {
     await persistAndNotify({ ...entry, state: "queued", last_error: null });
+  }
+}
+
+/**
+ * Reconciliation pass (Adjoa QA bug #3) — same shape as
+ * reconcileIdentityBlocks() above: finds entries stranded in 'syncing' and
+ * returns them to 'queued' so the normal FIFO dispatch loop picks them up
+ * again.
+ *
+ * Why entries can get stranded there at all: dispatchEntry persists
+ * `state: "syncing"` (with a `syncing_since` heartbeat) BEFORE awaiting the
+ * network call. Kill the app between that persist and the call resolving —
+ * a crash, force-quit, or low-memory OS kill, all routine on the hardware
+ * this app targets — and the entry is left in 'syncing' forever:
+ * nextQueuedEntry() only ever selects 'queued', and 'syncing' is
+ * deliberately exempt from retention pruning (§3.10 — it's unsynced money).
+ * Nothing else would ever pick it back up.
+ *
+ * Only entries whose `syncing_since` heartbeat is older than
+ * STALE_SYNCING_MS are touched — recent 'syncing' entries are left alone so
+ * this can't resurrect a dispatch genuinely still in flight (most plausibly
+ * one running right now in ANOTHER open tab of this same origin, sharing
+ * the same IndexedDB; a single tab's own flush() loop is already
+ * sequential/re-entrant-safe, so that's not a within-tab risk). An entry
+ * missing `syncing_since` entirely (defensive — pre-migration data, or any
+ * future bug that persists 'syncing' without stamping it) is treated as
+ * stale immediately, since there's no heartbeat to trust either way.
+ *
+ * Re-dispatching a possibly-already-sent request is SAFE BY DESIGN: every
+ * intent's `client_id` is generated once and never regenerated (design doc
+ * §3.3), so if the original attempt actually reached the server before the
+ * crash (or is still genuinely in flight and lands after this reconciles),
+ * the server's UNIQUE(client_id) constraint collapses the re-send into an
+ * idempotent replay (§3.4) — the exact same outcome as a fresh insert, from
+ * the queue's perspective (see dispatchEntry's comment on
+ * `idempotent_replay`). This makes re-dispatch here, at worst, a redundant
+ * network round-trip — never a double charge or a duplicate row.
+ *
+ * Called at the top of every flush() (alongside reconcileIdentityBlocks, so
+ * an ongoing session self-heals) AND once explicitly at outlet-app startup
+ * (see App.jsx's `pruneStaleEntries()` startup call for the same pattern) —
+ * the startup call matters because a killed-and-relaunched app may stay
+ * offline for a while before anything else triggers a flush(), and the
+ * cashier should see the entry return to a sane "syncing…" (== queued, from
+ * SyncBanner's perspective) state immediately rather than "stuck" the whole
+ * time.
+ *
+ * Exported (unlike reconcileIdentityBlocks, which has no reason to run
+ * outside a flush() pass) specifically so App.jsx can call it once, directly,
+ * at startup — see the "Called at..." paragraph above.
+ *
+ * @param {{ now?: number }} [opts]
+ * @returns {Promise<void>}
+ */
+export async function reconcileStaleSyncing({ now = Date.now() } = {}) {
+  const all = await getAllEntries();
+  const stale = all.filter(
+    (e) =>
+      e.state === "syncing" &&
+      (e.syncing_since == null || now - e.syncing_since > STALE_SYNCING_MS)
+  );
+  for (const entry of stale) {
+    await persistAndNotify({ ...entry, state: "queued", syncing_since: null });
   }
 }
 
@@ -430,6 +522,12 @@ export function flush() {
     // 'queued' first so it's eligible for the FIFO loop below, in this
     // same pass.
     await reconcileIdentityBlocks();
+
+    // Same idea for entries stranded in 'syncing' by a crash between
+    // dispatchEntry's write-first "syncing" persist and the network call
+    // resolving (Adjoa QA bug #3) — return any stale ones to 'queued' so
+    // they're eligible for the FIFO loop below too, in this same pass.
+    await reconcileStaleSyncing();
 
     let entry = await nextQueuedEntry(attemptedThisPass);
     while (entry) {
