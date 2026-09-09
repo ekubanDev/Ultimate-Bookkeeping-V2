@@ -183,6 +183,99 @@ async def test_admin_cannot_write_another_tenants_expense(admin_client):
     assert body["error"]["retryable"] is False
 
 
+# --- Read path: GET /sales (Adjoa's QA finding — the one blank spot: every
+# other endpoint through `resolve_authorized_outlet` had a tenant-boundary
+# test here, this one, despite returning the most sensitive aggregate
+# financial data in the system, didn't) --------------------------------------
+
+
+async def test_admin_cannot_read_another_tenants_sales(admin_client):
+    other = await _create_other_tenant(admin_client)
+
+    resp = await admin_client.get("/api/v1/sales", params={"outlet_id": str(other["outlet_id"])})
+
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "OUTLET_NOT_FOUND"
+    assert body["error"]["retryable"] is False
+
+
+async def test_admin_targeting_nonexistent_sales_outlet_gets_same_404_as_cross_tenant(admin_client):
+    """Same IDOR-defeating pattern as the GET /stock/levels pair above (and
+    GET /products in tests/test_products.py): a nonexistent outlet_id and
+    another tenant's real outlet_id must be indistinguishable."""
+    other = await _create_other_tenant(admin_client)
+    nonexistent_outlet_id = uuid.uuid4()
+
+    cross_tenant_resp = await admin_client.get("/api/v1/sales", params={"outlet_id": str(other["outlet_id"])})
+    nonexistent_resp = await admin_client.get(
+        "/api/v1/sales", params={"outlet_id": str(nonexistent_outlet_id)}
+    )
+
+    assert cross_tenant_resp.status_code == nonexistent_resp.status_code == 404
+    assert cross_tenant_resp.json() == nonexistent_resp.json()
+    assert cross_tenant_resp.json()["error"]["code"] == "OUTLET_NOT_FOUND"
+
+
+async def test_admin_happy_path_lists_own_outlets_sales(admin_client):
+    """Guard against over-tightening: an admin must still be able to list
+    their own outlet's sales."""
+    seed = admin_client.seed
+
+    create_resp = await admin_client.post(
+        "/api/v1/sales",
+        json={
+            "client_id": "own-outlet-sale-authz",
+            "outlet_id": str(seed["outlet_id"]),
+            "line_items": [
+                {"product_id": str(seed["product_id"]), "quantity": 1, "submitted_unit_price": "15.00"}
+            ],
+            "payment_method": "cash",
+            "discount_type": "fixed",
+            "discount_value": "0.00",
+            "tax_amount": "0.00",
+        },
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    resp = await admin_client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["client_id"] == "own-outlet-sale-authz"
+
+
+async def test_admin_cross_tenant_sales_404_holds_across_filter_and_order_combinations(admin_client):
+    """A filter or sort must never widen what a caller can see (task spec):
+    outlet resolution/authorization happens before any filter/order is
+    applied, so every combination of `price_variance_flagged` and `order`
+    against another tenant's outlet_id must produce the exact same 404 —
+    never a 200 with data, and never a differently-shaped error that could
+    itself leak information."""
+    other = await _create_other_tenant(admin_client)
+    baseline_resp = await admin_client.get("/api/v1/sales", params={"outlet_id": str(other["outlet_id"])})
+    assert baseline_resp.status_code == 404
+    baseline_body = baseline_resp.json()
+
+    for flagged_param, order_param in (
+        (None, "asc"),
+        (None, "desc"),
+        (True, "asc"),
+        (True, "desc"),
+        (False, "asc"),
+        (False, "desc"),
+    ):
+        params = {"outlet_id": str(other["outlet_id"]), "order": order_param}
+        if flagged_param is not None:
+            params["price_variance_flagged"] = str(flagged_param).lower()
+
+        resp = await admin_client.get("/api/v1/sales", params=params)
+
+        assert resp.status_code == 404, (flagged_param, order_param, resp.text)
+        assert resp.json() == baseline_body, (flagged_param, order_param)
+
+
 @pytest.mark.skipif(
     bool(os.environ.get("DATABASE_URL")),
     reason=(

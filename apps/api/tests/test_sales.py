@@ -656,3 +656,199 @@ async def test_get_sales_pagination_stable_across_tied_created_at_asc(client):
     assert sorted(seen) == sorted(client_ids)
     assert len(seen) == len(client_ids)
     assert len(set(seen)) == len(client_ids)
+
+
+# --- GET /api/v1/sales tenant/outlet scoping (Adjoa's QA finding — mirrors
+# test_outlet_manager_cannot_read_another_outlets_levels in tests/test_stock.py
+# and test_outlet_manager_is_scoped_to_own_outlet_ignoring_query_param in
+# tests/test_products.py; admin cross-tenant/404-parity coverage for this
+# endpoint lives in tests/test_authz.py) -------------------------------------
+
+
+async def test_outlet_manager_cannot_read_another_outlets_sales(client):
+    """Outlet scoping is enforced from the auth context — an
+    outlet_manager's own outlet always wins over a mismatched query param on
+    GET /sales too, consistent with every other endpoint through
+    `resolve_authorized_outlet`."""
+    seed = client.seed
+    other_outlet_id = uuid.uuid4()
+    create_resp = await client.post(
+        "/api/v1/sales", json=_sale_payload(seed, client_id="own-outlet-sale")
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    resp = await client.get("/api/v1/sales", params={"outlet_id": str(other_outlet_id)})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["client_id"] == "own-outlet-sale"
+    assert body[0]["outlet_id"] == str(seed["outlet_id"])
+
+
+async def _insert_sale_with_flag_directly(
+    client, seed, *, client_id: str, created_at: datetime, price_variance_flagged: bool
+) -> uuid.UUID:
+    """Like `_insert_sale_directly` above, but also inserts one
+    `SaleLineItem` so `price_variance_flagged` (an OR across a sale's line
+    items — see routers/sales.py `_sale_line_items_flagged`) can be pinned
+    directly, and `created_at` can be pinned independent of wall-clock POST
+    order — both matter here since two real POSTs made back-to-back in this
+    (fast, in-memory) test setup aren't guaranteed to land in different
+    `created_at` ticks, which would make the expected order/filter results
+    below flaky rather than deterministic."""
+    sale_id = await _insert_sale_directly(client, seed, client_id=client_id, created_at=created_at)
+    async with client.session_factory() as session:
+        session.add(
+            SaleLineItem(
+                id=uuid.uuid4(),
+                sale_id=sale_id,
+                product_id=seed["product_id"],
+                quantity=1,
+                unit_price=Decimal("15.00"),
+                line_total=Decimal("15.00"),
+                catalog_unit_price_at_sale=Decimal("15.00"),
+                price_variance_flagged=price_variance_flagged,
+            )
+        )
+        await session.commit()
+    return sale_id
+
+
+async def test_outlet_manager_scoping_holds_with_price_variance_filter_and_order(client):
+    """Combines the own-outlet-always-wins guarantee above with the
+    `price_variance_flagged` filter and `order` param, per task spec: a
+    filter or sort must never widen what a caller can see. A
+    malicious/foreign `outlet_id` param, together with every filter/order
+    combination, must still only ever return this outlet_manager's own
+    outlet's sales."""
+    seed = client.seed
+    other_outlet_id = uuid.uuid4()
+    base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
+
+    await _insert_sale_with_flag_directly(
+        client, seed, client_id="scope-clean", created_at=base, price_variance_flagged=False
+    )
+    await _insert_sale_with_flag_directly(
+        client,
+        seed,
+        client_id="scope-flagged",
+        created_at=base + timedelta(minutes=1),
+        price_variance_flagged=True,
+    )
+
+    for flagged_param, order_param, expected_client_ids in (
+        (None, "desc", ["scope-flagged", "scope-clean"]),
+        (None, "asc", ["scope-clean", "scope-flagged"]),
+        (True, "desc", ["scope-flagged"]),
+        (False, "desc", ["scope-clean"]),
+    ):
+        params = {"outlet_id": str(other_outlet_id), "order": order_param}
+        if flagged_param is not None:
+            params["price_variance_flagged"] = str(flagged_param).lower()
+
+        resp = await client.get("/api/v1/sales", params=params)
+
+        assert resp.status_code == 200, (flagged_param, order_param, resp.text)
+        body = resp.json()
+        assert [row["client_id"] for row in body] == expected_client_ids, (flagged_param, order_param)
+        assert all(row["outlet_id"] == str(seed["outlet_id"]) for row in body)
+
+
+# --- Upper bounds on quantity / line-item count (Adjoa's QA finding) --------
+#
+# `SaleLineItemIn.quantity` previously had no `le=`, and
+# `SaleCreateRequest.line_items` had no `max_length` — see app/schemas.py for
+# the chosen bounds (MAX_QUANTITY_PER_LINE_ITEM=10_000,
+# MAX_LINE_ITEMS_PER_SALE=100) and the reasoning behind them. A total near
+# the NUMERIC(12,2) ceiling is exercised against real Postgres specifically
+# (test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db, below) — this
+# is exactly the kind of DB-boundary behaviour SQLite (no NUMERIC precision
+# enforcement) would silently pass regardless of whether it actually works.
+
+
+async def test_rejects_quantity_above_ceiling(client):
+    seed = client.seed
+    payload = _sale_payload(seed, client_id="client-qty-ceiling")
+    payload["line_items"][0]["quantity"] = 10_001  # MAX_QUANTITY_PER_LINE_ITEM + 1
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_accepts_quantity_at_ceiling(client):
+    """Guard against over-tightening: exactly MAX_QUANTITY_PER_LINE_ITEM is
+    still valid. Uses a dedicated product stocked to exactly the ceiling —
+    the default seeded stock (10 units) would otherwise fail on
+    INSUFFICIENT_STOCK before quantity validation is even the thing under
+    test."""
+    seed = client.seed
+    product_id = await _add_product(client, seed, unit_price=Decimal("0.01"), quantity=10_000)
+    payload = _sale_payload(
+        seed, client_id="client-qty-at-ceiling", unit_price="0.01", product_id=product_id
+    )
+    payload["line_items"][0]["quantity"] = 10_000  # MAX_QUANTITY_PER_LINE_ITEM
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 201, resp.text
+
+
+async def test_rejects_line_items_above_ceiling(client):
+    seed = client.seed
+    # 101 line items for the same product (MAX_LINE_ITEMS_PER_SALE=100 + 1)
+    # — content doesn't matter, only the count; rejected by Pydantic's
+    # `max_length` before any DB/catalog lookup happens.
+    payload = _sale_payload(seed, client_id="client-lineitems-ceiling")
+    payload["line_items"] = [
+        {"product_id": str(seed["product_id"]), "quantity": 1, "submitted_unit_price": "15.00"}
+        for _ in range(101)
+    ]
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db(client):
+    """DB-boundary check (task spec): a total near the NUMERIC(12,2) ceiling
+    (max 9,999,999,999.99 — 10 integer digits, 2dp) must be accepted,
+    persisted, and read back exactly — this is precisely the kind of
+    assertion that passes on SQLite (no NUMERIC precision enforcement)
+    whether or not it's actually true, and must be verified against real
+    Postgres. Run via `DATABASE_URL=...postgresql...` per tests/conftest.py.
+
+    A single line item (quantity=1) at the ceiling price is used rather than
+    a large quantity, since MAX_QUANTITY_PER_LINE_ITEM (10_000) x a
+    realistic catalog price stays nowhere near this boundary by design (see
+    app/schemas.py) — this test is about the DB column's own limit, not
+    about triggering it via the new quantity ceiling.
+    """
+    seed = client.seed
+    ceiling_price = "9999999999.99"  # NUMERIC(12,2) max: 10 integer digits + 2dp
+    product_id = await _add_product(client, seed, unit_price=Decimal(ceiling_price), quantity=1)
+
+    payload = _sale_payload(
+        seed,
+        client_id="client-numeric-ceiling",
+        quantity=1,
+        unit_price=ceiling_price,
+        tax="0.00",
+        discount_value="0.00",
+        product_id=product_id,
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["subtotal_amount"] == ceiling_price
+    assert body["total_amount"] == ceiling_price
+
+    list_resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
+    assert list_resp.status_code == 200, list_resp.text
+    listed = next(row for row in list_resp.json() if row["client_id"] == "client-numeric-ceiling")
+    assert listed["total_amount"] == ceiling_price

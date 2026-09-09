@@ -18,6 +18,45 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
 
+# Upper bounds on a sale's shape (Adjoa's QA finding): `sale_line_items.quantity`
+# and `SaleCreateRequest.line_items` had no ceiling at all, so a large
+# `quantity` x `unit_price` could exceed what a `NUMERIC(12,2)` column can
+# hold (~10 integer digits, max 9,999,999,999.99 — see
+# alembic/versions/6cca266108dc_initial_schema.py), and a pathologically long
+# line-item list was accepted unbounded (a DoS/cost vector: each line item
+# does a catalog lookup, a stock check, and inserts a SaleLineItem +
+# StockMovement row inside one transaction).
+#
+# Bounds are grounded in Ghanaian retail-outlet reality, not just arithmetic
+# headroom (this endpoint's `submitted_unit_price` is cashier-entered and has
+# no digit-count ceiling of its own — see note below):
+# - MAX_QUANTITY_PER_LINE_ITEM = 10,000: even a large bulk/wholesale-style
+#   purchase of a single SKU at one outlet (e.g. sachet water for an event,
+#   a bulk cement order) realistically tops out in the hundreds to low
+#   thousands; 10,000 leaves generous headroom above that while making a
+#   fat-fingered or probing extreme value impossible. Paired with a
+#   plausible catalog price ceiling (well under NUMERIC(12,2)'s ~10-digit
+#   capacity), this keeps ordinary sales nowhere near the DB boundary.
+# - MAX_LINE_ITEMS_PER_SALE = 100: a single checkout basket in this market
+#   rarely exceeds a few dozen distinct SKUs; 100 comfortably covers even an
+#   unusually large basket while bounding both the sum-of-line-totals
+#   overflow risk and the per-request DB/processing cost — the latter
+#   matters doubly here since offline-queued sales sync over often-slow,
+#   metered West African mobile connections, where an unbounded payload is
+#   also a client-side cost/battery concern.
+#
+# NOTE (flagged, not fixed here — out of this change's scope): unlike
+# `quantity`, `submitted_unit_price` (validate_money_string, below) has no
+# digit-count ceiling — the regex allows arbitrarily many integer digits.
+# These two bounds alone cannot *mathematically* guarantee no NUMERIC(12,2)
+# overflow against an adversarial unit_price; they close the gap this task
+# was scoped to (quantity/line-item-count) and make overflow unreachable for
+# any realistic catalog price, but a follow-up bounding `submitted_unit_price`
+# itself (and `products.unit_price`, `ExpenseCreateRequest.amount`, etc. — the
+# same regex is shared by every money field) is worth Kwame/Nana's input.
+MAX_QUANTITY_PER_LINE_ITEM = 10_000
+MAX_LINE_ITEMS_PER_SALE = 100
+
 
 def validate_money_string(value: str) -> str:
     """Validate a wire-format money string: non-negative, <=2dp, no floats.
@@ -39,7 +78,7 @@ class SaleLineItemIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     product_id: uuid.UUID
-    quantity: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=MAX_QUANTITY_PER_LINE_ITEM)
     # Renamed from `unit_price` (deliberate — server-authoritative pricing
     # spec, Ama/Nana): the old name invited treating client input as
     # authoritative. This is the cashier-entered price; the server persists
@@ -59,7 +98,7 @@ class SaleCreateRequest(BaseModel):
 
     client_id: str = Field(min_length=1)
     outlet_id: uuid.UUID
-    line_items: list[SaleLineItemIn] = Field(min_length=1)
+    line_items: list[SaleLineItemIn] = Field(min_length=1, max_length=MAX_LINE_ITEMS_PER_SALE)
     payment_method: str | None = None
     # Raw cashier input — server computes `discount_amount` from these, it
     # is never accepted directly (app/pricing.py `compute_discount_amount`).
