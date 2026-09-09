@@ -15,6 +15,45 @@ const DB_NAME = "ub-offline-queue";
 const DB_VERSION = 1;
 const STORE_NAME = "queue_entries";
 
+/**
+ * True when `err` is IndexedDB's way of saying "storage quota exceeded" —
+ * the exact condition Adjoa QA #6 flags as unhandled. Browsers do not agree
+ * on how this is surfaced, so this checks every form seen in the wild:
+ *   - Modern/spec-compliant: a `DOMException` (or DOMException-shaped error)
+ *     with `.name === "QuotaExceededError"`.
+ *   - Legacy WebKit (older Safari/iOS WebViews — plausible on the cheap
+ *     shared Android devices this app targets if the OS ships an old
+ *     system WebView): numeric `.code === 22` (the old `QUOTA_EXCEEDED_ERR`
+ *     constant), sometimes with no `.name` at all.
+ *   - Old Firefox: `NS_ERROR_DOM_QUOTA_REACHED`, numeric `.code === 1014`.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isQuotaExceededError(err) {
+  if (!err || typeof err !== "object") return false;
+  const name = /** @type {{ name?: unknown }} */ (err).name;
+  if (name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED") return true;
+  const code = /** @type {{ code?: unknown }} */ (err).code;
+  return code === 22 || code === 1014;
+}
+
+/**
+ * Thrown by `putEntry` (instead of the raw browser error) whenever a write
+ * is rejected for being out of storage, so callers can handle this
+ * specific, actionable condition distinctly from any other IndexedDB
+ * failure. The original browser error is kept on `.cause` for debugging.
+ */
+export class QuotaExceededStorageError extends Error {
+  /** @param {unknown} [cause] */
+  constructor(cause) {
+    super(
+      "offline-queue: IndexedDB write rejected — device storage is full (QuotaExceededError)."
+    );
+    this.name = "QuotaExceededStorageError";
+    this.cause = cause;
+  }
+}
+
 /** @type {Promise<IDBDatabase> | null} */
 let dbPromise = null;
 
@@ -71,9 +110,19 @@ function txDone(tx) {
  */
 export async function putEntry(entry) {
   const db = await openDb();
-  const tx = db.transaction(STORE_NAME, "readwrite");
-  tx.objectStore(STORE_NAME).put(entry);
-  await txDone(tx);
+  try {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(entry);
+    await txDone(tx);
+  } catch (err) {
+    // Normalize every quota-exhaustion shape (see isQuotaExceededError) into
+    // one typed error so callers (index.js#persistAndNotify) can handle this
+    // specific, actionable condition without re-sniffing browser quirks.
+    if (isQuotaExceededError(err)) {
+      throw new QuotaExceededStorageError(err);
+    }
+    throw err;
+  }
   return entry;
 }
 

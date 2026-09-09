@@ -93,6 +93,17 @@ export default function ExpenseForm({ onSubmit, status = "idle" }) {
           Could not record this expense. Try again.
         </p>
       ) : null}
+      {status === "storage_full" ? (
+        // Distinct from the generic 'failed' message above: editing the
+        // fields cannot fix a full disk, and nothing was saved for this
+        // expense at all — see useSubmitExpense.js.
+        <p className="ub-expense-form__error" role="alert">
+          This device is out of storage space, so this expense was NOT
+          recorded — nothing was saved. Free up space on this device
+          (delete old photos, clear other apps' data, uninstall unused
+          apps) and try again, or record this expense on another device.
+        </p>
+      ) : null}
       <Button type="submit" disabled={status === "queued"}>
         {status === "queued" ? "Recording..." : "Add expense"}
       </Button>

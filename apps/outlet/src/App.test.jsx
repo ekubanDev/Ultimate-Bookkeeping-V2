@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import App from "./App.jsx";
 
 // App wires onReconnect() once at startup and SyncBanner reads the queue
@@ -9,6 +9,10 @@ import App from "./App.jsx";
 const enqueueMock = vi.fn();
 vi.mock("@ub/offline-queue", () => ({
   enqueue: (...args) => enqueueMock(...args),
+  // useSubmitSale imports this to distinguish a full-disk enqueue() failure
+  // from every other failure mode (Adjoa QA #6) — stub it as a real class so
+  // `instanceof` checks work the same as against the real export.
+  QuotaExceededStorageError: class QuotaExceededStorageError extends Error {},
   onReconnect: () => () => {},
   getQueueSnapshot: () =>
     Promise.resolve({
@@ -100,6 +104,39 @@ describe("App — auth status gate", () => {
     // The resolve-failed-entries flow (Adjoa QA bug #2 fix — see
     // SyncResolutionScreen.jsx) is reachable from the bottom nav.
     expect(screen.getByRole("link", { name: /sync/i })).toBeTruthy();
+  });
+
+  // react-router-dom v6 -> v7 migration (Yaw's audit — housekeeping, no
+  // reachable exploit in how this app uses the library: only static
+  // routes, no SSR, no user-controlled redirect targets). This is the
+  // "every route still works" verification the migration asked for: click
+  // through all four bottom-nav destinations (Stock/Expenses/Sync are
+  // React.lazy-split — see App.jsx's ROUTE-SPLITTING NOTE — so each needs
+  // an await for its chunk + Suspense fallback to resolve) and confirm
+  // BrowserRouter/Routes/Route/Navigate/NavLink still wire up correctly
+  // under v7.
+  it("navigates to every route (POS, Stock, Expenses, Sync) via the bottom nav", async () => {
+    useAuthMock.mockReturnValue({
+      status: "signed_in",
+      profile: { id: "user-1", role: "outlet_manager", outlet_id: "outlet-1", display_name: "Test Manager" },
+      error: null,
+    });
+    render(<App />);
+
+    // Default route ("/") -> <Navigate to="/pos" replace /> -> /pos.
+    expect(screen.getByRole("heading", { name: /^pos$/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: /^stock$/i }));
+    expect(await screen.findByRole("heading", { name: /^stock$/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: /^expenses$/i }));
+    expect(await screen.findByRole("heading", { name: /^expenses$/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: /^sync$/i }));
+    expect(await screen.findByRole("heading", { name: /^sync$/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("link", { name: /^pos$/i }));
+    expect(await screen.findByRole("heading", { name: /^pos$/i })).toBeTruthy();
   });
 
   // Offline-relaunch lockout fix (Adjoa QA bug #1, AuthContext.jsx): the app

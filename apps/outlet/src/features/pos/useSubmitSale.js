@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { generateClientId } from "@ub/offline-queue/idempotency.js";
-import { enqueue } from "@ub/offline-queue";
+import { enqueue, QuotaExceededStorageError } from "@ub/offline-queue";
 import { useAuth } from "../../auth/AuthContext.jsx";
 
 /**
@@ -71,7 +71,9 @@ export function buildSaleIntent(
  */
 export function useSubmitSale() {
   const { profile } = useAuth();
-  const [status, setStatus] = useState(/** @type {'idle'|'queued'|'synced'|'failed'} */ ("idle"));
+  const [status, setStatus] = useState(
+    /** @type {'idle'|'queued'|'synced'|'failed'|'storage_full'} */ ("idle")
+  );
   const [error, setError] = useState(null);
 
   /**
@@ -119,7 +121,18 @@ export function useSubmitSale() {
       setStatus(entry?.state === "syncing" ? "queued" : entry?.state ?? "queued");
       return entry;
     } catch (err) {
-      setStatus("failed");
+      // A quota failure here means enqueue() itself rejected — unlike a
+      // post-dispatch failure (which at least leaves a 'failed' entry in
+      // the queue for retry/discard), NOTHING was durably persisted: no
+      // client_id, no record, the sale is simply gone. That's a materially
+      // different, more urgent condition than a normal submission failure
+      // ("check the details and try again" would be actively misleading —
+      // editing details cannot fix a full disk), so it gets its own status
+      // rather than collapsing into 'failed'. See
+      // @ub/offline-queue/db.js#QuotaExceededStorageError and
+      // index.js#persistAndNotify's emergency-prune-and-retry, which is
+      // attempted before this ever surfaces.
+      setStatus(err instanceof QuotaExceededStorageError ? "storage_full" : "failed");
       setError(err);
       throw err;
     }

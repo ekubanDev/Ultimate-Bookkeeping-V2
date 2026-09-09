@@ -239,6 +239,19 @@ export default function CheckoutModal({
           Could not record this sale. Check the details and try again.
         </p>
       ) : null}
+      {status === "storage_full" ? (
+        // Deliberately NOT the same copy as the generic 'failed' message
+        // above: editing the details cannot fix a full disk, and unlike a
+        // post-dispatch failure, nothing was saved for this sale at all —
+        // no record survives to retry from. Tell the cashier the truth and
+        // what would actually help.
+        <p className="ub-checkout-modal__error" role="alert">
+          This device is out of storage space, so this sale was NOT
+          recorded — nothing was saved. Free up space on this device
+          (delete old photos, clear other apps' data, uninstall unused
+          apps) and try again, or complete this sale on another device.
+        </p>
+      ) : null}
       <Button onClick={handleConfirm} disabled={!canConfirm}>
         {status === "queued" ? "Recording..." : "Confirm sale"}
       </Button>

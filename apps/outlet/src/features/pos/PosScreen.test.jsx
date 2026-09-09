@@ -9,6 +9,10 @@ import PosScreen from "./PosScreen.jsx";
 const enqueueMock = vi.fn();
 vi.mock("@ub/offline-queue", () => ({
   enqueue: (...args) => enqueueMock(...args),
+  // useSubmitSale imports this to distinguish a full-disk enqueue() failure
+  // from every other failure mode (Adjoa QA #6) — stub it as a real class so
+  // `instanceof` checks work the same as against the real export.
+  QuotaExceededStorageError: class QuotaExceededStorageError extends Error {},
 }));
 
 // PosScreen now reads outlet_id from useAuth().profile rather than a
@@ -150,6 +154,51 @@ describe("PosScreen — happy checkout path", () => {
     const [intent] = enqueueMock.mock.calls[0];
     expect(intent.payload.discount_type).toBe("fixed");
     expect(intent.payload.discount_value).toBe("5.00");
+  });
+});
+
+describe("PosScreen — double-tap protection (Adjoa QA #5)", () => {
+  // client_id is generated fresh inside submitSale on every call, and the
+  // whole idempotency contract (design doc §3.3) rests on it being
+  // generated exactly ONCE per intent. CheckoutModal's `canConfirm` only
+  // gates on `status !== 'queued'` — a piece of React state that only
+  // takes effect after a re-render. Nothing previously exercised the
+  // real double-tap path end to end (real CheckoutModal + real
+  // useSubmitSale, only @ub/offline-queue's enqueue mocked), so this test
+  // fires two rapid, synchronous confirms — exactly what two fast taps on
+  // a touchscreen deliver: two separate 'click' events in quick
+  // succession, with no `await` (no yield to the microtask/event queue)
+  // between them — and asserts enqueue() was called exactly once.
+  it("firing two rapid confirms enqueues exactly once, not two duplicate sales", async () => {
+    let resolveEnqueue;
+    enqueueMock.mockReset();
+    enqueueMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveEnqueue = resolve;
+        })
+    );
+
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Milo 400g/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+    const confirmButton = await screen.findByRole("button", { name: /confirm sale/i });
+
+    // Two back-to-back taps, synchronously, with no await in between.
+    fireEvent.click(confirmButton);
+    fireEvent.click(confirmButton);
+
+    // The submission guard must hold WITHOUT relying on a second React
+    // re-render having happened yet: exactly one intent was ever built and
+    // handed to the offline queue.
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+    expect(new Set(enqueueMock.mock.calls.map(([intent]) => intent.client_id)).size).toBe(1);
+
+    // Let the in-flight enqueue() resolve so the test doesn't leak a
+    // pending act() warning/unhandled state update into later tests.
+    resolveEnqueue({ state: "queued", client_id: enqueueMock.mock.calls[0][0].client_id });
+    await screen.findByText("Cart is empty.");
   });
 });
 

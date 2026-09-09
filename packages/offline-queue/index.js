@@ -16,7 +16,12 @@
  */
 
 import { postSale, postStockAdjustment, postExpense, ApiClientError } from "@ub/api-client";
-import { getAllEntries, getEntry, putEntry, deleteEntries } from "./db.js";
+import { getAllEntries, getEntry, putEntry, deleteEntries, QuotaExceededStorageError } from "./db.js";
+
+// Re-exported so consumers (e.g. apps/outlet's useSubmitSale) can detect
+// "this device is out of storage" distinctly from every other failure mode,
+// without reaching into this package's db.js internals directly.
+export { QuotaExceededStorageError } from "./db.js";
 
 /** Maps an intent `type` to the @ub/api-client function that submits it. */
 const DISPATCHERS = {
@@ -159,9 +164,47 @@ function toStructuredError(err) {
   };
 }
 
-/** Persists an entry and notifies subscribers with the fresh snapshot. */
+/**
+ * Persists an entry and notifies subscribers with the fresh snapshot. This
+ * is the single funnel every state-changing write in this module goes
+ * through (enqueue, dispatchEntry's transitions, retryEntry, discardEntry,
+ * the two reconcile* passes) — so the quota handling below applies
+ * everywhere a write can be lost to a full disk, not just at enqueue time.
+ *
+ * Adjoa QA #6: on a cheap shared Android device with little free storage,
+ * `putEntry` can reject with `QuotaExceededStorageError` (see db.js). For
+ * `enqueue()` specifically this is uniquely bad among failure modes: there
+ * is no queue entry left behind at all — no `client_id`, no record — so
+ * unlike a post-dispatch failure (which at minimum stays 'failed' in the
+ * queue for retry/discard), the write is simply gone the moment this
+ * rejects. One emergency measure is attempted before giving up: prune every
+ * terminal ('synced'/'discarded') entry immediately (ignoring the normal
+ * 48h retention window — see pruneStaleEntries) to reclaim whatever space
+ * is safe to reclaim, then retry the write exactly once.
+ *
+ * This can NEVER prune anything unsynced ('queued'/'syncing'/'failed'/
+ * 'blocked_identity_mismatch') — pruneStaleEntries' own filtering
+ * guarantees that; losing recorded-but-unsynced money to save storage would
+ * be strictly worse than the original problem. If the retry still fails
+ * (nothing was safely prunable, or the disk is full even after pruning),
+ * this throws — deliberately not attempting a second prune or a second
+ * retry, so a genuinely full disk fails cleanly instead of looping.
+ */
 async function persistAndNotify(entry) {
-  await putEntry(entry);
+  try {
+    await putEntry(entry);
+  } catch (err) {
+    if (!(err instanceof QuotaExceededStorageError)) throw err;
+
+    const { prunedCount } = await pruneStaleEntries({ retentionMs: 0 });
+    if (prunedCount === 0) {
+      // Nothing safe to reclaim — surface the honest error immediately.
+      throw err;
+    }
+    // One retry, no loop: either this lands or we give up honestly.
+    await putEntry(entry);
+  }
+
   const snapshot = await getQueueSnapshot();
   for (const listener of listeners) {
     try {

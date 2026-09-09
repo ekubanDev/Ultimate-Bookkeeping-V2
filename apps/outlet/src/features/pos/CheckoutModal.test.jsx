@@ -146,6 +146,31 @@ describe("CheckoutModal — validation (no parseFloat, regex-only)", () => {
   });
 });
 
+describe("CheckoutModal — storage-full status (Adjoa QA #6)", () => {
+  it("shows a distinct, truthful out-of-storage message, not the generic failed message", () => {
+    renderModal({ status: "storage_full" });
+
+    expect(screen.getByRole("alert").textContent).toMatch(/out of storage space/i);
+    expect(screen.getByRole("alert").textContent).toMatch(/NOT\s+recorded/i);
+    // Must not also show the generic "check the details" message — that
+    // advice is actively misleading for a full-disk failure.
+    expect(screen.queryByText(/check the details and try again/i)).toBeNull();
+  });
+
+  it("does not show the storage-full message for a plain 'failed' status", () => {
+    renderModal({ status: "failed" });
+
+    expect(screen.getByText(/could not record this sale/i)).toBeTruthy();
+    expect(screen.queryByText(/out of storage space/i)).toBeNull();
+  });
+
+  it("re-enables Confirm sale after a storage_full status so the cashier can retry once space is freed", () => {
+    renderModal({ status: "storage_full" });
+
+    expect(screen.getByRole("button", { name: /confirm sale/i }).disabled).toBe(false);
+  });
+});
+
 describe("previewTotalCents — pure preview math (integer cents, half-up rounding)", () => {
   it("applies a fixed discount and adds tax", () => {
     // 100.00 subtotal, 20.00 fixed discount, 3.00 tax -> 83.00

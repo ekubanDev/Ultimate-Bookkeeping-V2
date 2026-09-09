@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { generateClientId } from "@ub/offline-queue/idempotency.js";
-import { enqueue } from "@ub/offline-queue";
+import { enqueue, QuotaExceededStorageError } from "@ub/offline-queue";
 import { useAuth } from "../../auth/AuthContext.jsx";
 
 /**
@@ -48,7 +48,9 @@ export function buildExpenseIntent({ outletId, amount, category, note, deviceRec
  */
 export function useSubmitExpense() {
   const { profile } = useAuth();
-  const [status, setStatus] = useState(/** @type {'idle'|'queued'|'synced'|'failed'} */ ("idle"));
+  const [status, setStatus] = useState(
+    /** @type {'idle'|'queued'|'synced'|'failed'|'storage_full'} */ ("idle")
+  );
   const [error, setError] = useState(null);
 
   /**
@@ -86,7 +88,12 @@ export function useSubmitExpense() {
       setStatus(entry?.state === "syncing" ? "queued" : entry?.state ?? "queued");
       return entry;
     } catch (err) {
-      setStatus("failed");
+      // See useSubmitSale.js's matching catch block: a quota failure here
+      // means enqueue() itself rejected — no client_id, no record, this
+      // expense is simply gone, unlike a post-dispatch failure that at
+      // least leaves a 'failed' entry to retry/discard. Distinct status so
+      // ExpenseForm can tell the truth instead of "try again".
+      setStatus(err instanceof QuotaExceededStorageError ? "storage_full" : "failed");
       setError(err);
       throw err;
     }

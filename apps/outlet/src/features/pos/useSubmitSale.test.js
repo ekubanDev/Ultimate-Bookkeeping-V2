@@ -1,5 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { buildSaleIntent } from "./useSubmitSale.js";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { renderHook, act, waitFor } from "@testing-library/react";
+
+// vi.mock calls are only hoisted above this file's static imports when
+// they're top-level statements — nested inside a describe()/it() they run
+// too late, after useSubmitSale.js has already bound its own `enqueue`/
+// `QuotaExceededStorageError` imports to the REAL module. Must live here,
+// not inside the "storage-full handling" describe block below.
+const enqueueMock = vi.fn();
+vi.mock("@ub/offline-queue", async () => {
+  const actual = await vi.importActual("@ub/offline-queue");
+  return {
+    ...actual,
+    enqueue: (...args) => enqueueMock(...args),
+  };
+});
+vi.mock("../../auth/AuthContext.jsx", () => ({
+  useAuth: () => ({ profile: { id: "user-1", outlet_id: "outlet-1" } }),
+}));
+
+const { buildSaleIntent, useSubmitSale } = await import("./useSubmitSale.js");
+const { QuotaExceededStorageError } = await import("@ub/offline-queue");
 
 const CLIENT_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_RECORDED_AT = "2026-09-01T09:00:00.000Z";
@@ -105,5 +125,47 @@ describe("buildSaleIntent", () => {
     ];
 
     expect(buildSaleIntent(...args)).toEqual(buildSaleIntent(...args));
+  });
+});
+
+describe("useSubmitSale — storage-full handling (Adjoa QA #6)", () => {
+  beforeEach(() => {
+    enqueueMock.mockReset();
+  });
+
+  it("sets status to 'storage_full' (not 'failed') when enqueue() rejects with QuotaExceededStorageError", async () => {
+    enqueueMock.mockRejectedValueOnce(new QuotaExceededStorageError(new Error("full")));
+
+    const { result } = renderHook(() => useSubmitSale());
+
+    await act(async () => {
+      await expect(
+        result.current.submitSale({
+          outletId: "outlet-1",
+          lineItems: LINE_ITEMS,
+          paymentMethod: "cash",
+        })
+      ).rejects.toThrow();
+    });
+
+    await waitFor(() => expect(result.current.status).toBe("storage_full"));
+  });
+
+  it("sets status to 'failed' (not 'storage_full') for every other kind of enqueue() rejection", async () => {
+    enqueueMock.mockRejectedValueOnce(new Error("some other failure"));
+
+    const { result } = renderHook(() => useSubmitSale());
+
+    await act(async () => {
+      await expect(
+        result.current.submitSale({
+          outletId: "outlet-1",
+          lineItems: LINE_ITEMS,
+          paymentMethod: "cash",
+        })
+      ).rejects.toThrow();
+    });
+
+    await waitFor(() => expect(result.current.status).toBe("failed"));
   });
 });
