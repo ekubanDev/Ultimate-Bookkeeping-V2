@@ -112,3 +112,41 @@ async def test_rejects_empty_category(client):
 
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+# --- NUMERIC(12,2) digit-count ceiling (Efua's follow-up to the sales
+# quantity/line-item bounds — see app/schemas.py `MONEY_MAX_VALUE`) --------
+
+MONEY_CEILING = "9999999999.99"  # NUMERIC(12,2) max: 10 integer digits + 2dp
+OVER_CEILING = "10000000000.00"
+
+
+async def test_rejects_amount_above_numeric_ceiling(client):
+    seed = client.seed
+    payload = _expense_payload(seed, client_id="exp-over-ceiling", amount=OVER_CEILING)
+
+    resp = await client.post("/api/v1/expenses", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_accepts_amount_at_exact_numeric_ceiling(client):
+    """The exact boundary (9,999,999,999.99) must still be accepted and
+    round-trip — this is the same value/rationale as
+    test_sales.py's test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db,
+    run against both engines the same way the rest of this suite is."""
+    seed = client.seed
+    payload = _expense_payload(seed, client_id="exp-at-ceiling", amount=MONEY_CEILING)
+
+    resp = await client.post("/api/v1/expenses", json=payload)
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["amount"] == MONEY_CEILING
+
+    async with client.session_factory() as session:
+        expense = (
+            await session.execute(select(Expense).where(Expense.client_id == "exp-at-ceiling"))
+        ).scalar_one()
+    assert expense.amount == Decimal(MONEY_CEILING)

@@ -14,9 +14,20 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from app.pricing import compute_line_total
 
 _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
+
+# NUMERIC(12,2) ceiling (alembic/versions/6cca266108dc_initial_schema.py):
+# 12 significant digits total, 2 of them after the decimal point, so at most
+# 10 integer digits -> max value 9,999,999,999.99. Every money column in the
+# schema (products.unit_price, sale_line_items.unit_price/line_total,
+# sales.subtotal_amount/discount_value/discount_amount/tax_amount/
+# total_amount, expenses.amount) is NUMERIC(12,2), so this single constant is
+# the ceiling for all of them.
+MONEY_MAX_VALUE = Decimal("9999999999.99")
 
 # Upper bounds on a sale's shape (Adjoa's QA finding): `sale_line_items.quantity`
 # and `SaleCreateRequest.line_items` had no ceiling at all, so a large
@@ -28,8 +39,7 @@ _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
 # StockMovement row inside one transaction).
 #
 # Bounds are grounded in Ghanaian retail-outlet reality, not just arithmetic
-# headroom (this endpoint's `submitted_unit_price` is cashier-entered and has
-# no digit-count ceiling of its own — see note below):
+# headroom:
 # - MAX_QUANTITY_PER_LINE_ITEM = 10,000: even a large bulk/wholesale-style
 #   purchase of a single SKU at one outlet (e.g. sachet water for an event,
 #   a bulk cement order) realistically tops out in the hundreds to low
@@ -45,15 +55,18 @@ _MONEY_RE = re.compile(r"^\d+(\.\d{1,2})?$")
 #   metered West African mobile connections, where an unbounded payload is
 #   also a client-side cost/battery concern.
 #
-# NOTE (flagged, not fixed here — out of this change's scope): unlike
-# `quantity`, `submitted_unit_price` (validate_money_string, below) has no
-# digit-count ceiling — the regex allows arbitrarily many integer digits.
-# These two bounds alone cannot *mathematically* guarantee no NUMERIC(12,2)
-# overflow against an adversarial unit_price; they close the gap this task
-# was scoped to (quantity/line-item-count) and make overflow unreachable for
-# any realistic catalog price, but a follow-up bounding `submitted_unit_price`
-# itself (and `products.unit_price`, `ExpenseCreateRequest.amount`, etc. — the
-# same regex is shared by every money field) is worth Kwame/Nana's input.
+# CLOSED (previously flagged as out of scope here): `submitted_unit_price`
+# (and every other field sharing `validate_money_string`) now carries its own
+# digit-count ceiling — `MONEY_MAX_VALUE`, above — so quantity/line-count
+# bounds no longer have to (and can't, on their own — see the arithmetic on
+# `_validate_sale_totals_within_numeric_ceiling` below) carry the entire
+# overflow-prevention burden. MAX_QUANTITY_PER_LINE_ITEM alone is NOT a
+# sufficient guard even with a bounded unit_price: 10,000 (quantity) x
+# 9,999,999,999.99 (a single, individually-valid, post-fix unit_price) is
+# ~9.9999999999999e13 — twelve orders of magnitude past what a single
+# `sale_line_items.line_total NUMERIC(12,2)` can hold, from ONE line item,
+# before summing across the basket even starts. The aggregate guard on
+# `SaleCreateRequest` below is what actually closes that.
 MAX_QUANTITY_PER_LINE_ITEM = 10_000
 MAX_LINE_ITEMS_PER_SALE = 100
 
@@ -66,11 +79,31 @@ def validate_money_string(value: str) -> str:
     rejected by the field's `str` type before this validator even runs — this
     function additionally guards against strings with the wrong shape, e.g.
     `"15.000"` (3dp), `"-1.00"` (negative), `"abc"`, `""`.
+
+    Also enforces `MONEY_MAX_VALUE`, the NUMERIC(12,2) digit-count ceiling —
+    without this, a value like `"99999999999999.99"` passes the shape regex
+    (it IS a non-negative, <=2dp decimal string) but can never be persisted:
+    on Postgres it's a 500 (`numeric field overflow`) raised well past this
+    validation boundary, after other side effects (stock checks, etc.) may
+    already have run; on SQLite (no NUMERIC precision enforcement) it would
+    silently "succeed" while storing a value the production database could
+    never actually hold. Rejecting it here, at the API boundary, makes the
+    behavior identical — a clean `VALIDATION_ERROR` (422) — on both.
+
+    Applies uniformly across every reading of every field that shares this
+    validator: `SaleLineItemIn.submitted_unit_price`,
+    `SaleCreateRequest.tax_amount`, `SaleCreateRequest.discount_value` (both
+    as a 'fixed' GHS amount AND as a 'percentage' 0-100 value — 100.00 is far
+    below `MONEY_MAX_VALUE`, so this bound never interferes with the
+    tighter, percentage-specific 0-100 check layered on top of it), and
+    `ExpenseCreateRequest.amount`.
     """
     if not isinstance(value, str) or not _MONEY_RE.match(value):
         raise ValueError(
             "must be a non-negative decimal string with at most 2 decimal places, e.g. '15.00'"
         )
+    if Decimal(value) > MONEY_MAX_VALUE:
+        raise ValueError(f"must not exceed {MONEY_MAX_VALUE} (NUMERIC(12,2) ceiling)")
     return value
 
 
@@ -129,6 +162,69 @@ class SaleCreateRequest(BaseModel):
     @property
     def tax_amount_decimal(self) -> Decimal:
         return Decimal(self.tax_amount)
+
+    @model_validator(mode="after")
+    def _validate_sale_totals_within_numeric_ceiling(self) -> "SaleCreateRequest":
+        """Aggregate overflow guard — closes the gap per-field bounds can't
+        reach on their own.
+
+        Every per-field money bound (`MONEY_MAX_VALUE` in `validate_money_string`)
+        constrains one string in isolation. It cannot constrain a *product*
+        like `quantity * submitted_unit_price`, and both
+        `sale_line_items.line_total` and `sales.subtotal_amount` are
+        themselves NUMERIC(12,2) columns holding exactly that kind of
+        product/sum. Concretely, with `MAX_QUANTITY_PER_LINE_ITEM = 10_000`:
+
+            10_000 * Decimal("9999999999.99") = 99_999_999_999_900.00
+
+        — a single line item, each of whose inputs individually satisfies
+        its own per-field bound, produces a `line_total` ~1e13 over what
+        `NUMERIC(12,2)` can store. So the per-field bound plus the existing
+        quantity/line-count bounds do NOT make overflow unreachable; this
+        model-level check is required, not optional hardening.
+
+        We check the *summed* `subtotal_amount` (sum of every line's
+        `quantity * submitted_unit_price`) against `MONEY_MAX_VALUE` rather
+        than each line separately: every `line_total` is non-negative, so
+        each one is individually <= the sum. One check on the sum therefore
+        also bounds every individual `line_total` — this is exactly the
+        "100 line items x 10,000 quantity x a large unit_price" aggregate
+        case flagged in the task, and it subsumes the single-line-item case
+        above (a 1-line sale's subtotal IS that line's line_total).
+
+        `total_amount` (`subtotal_amount - discount_amount + tax_amount`,
+        also NUMERIC(12,2)) is the other computed column that could still
+        overflow even with a bounded subtotal, if `tax_amount` is itself
+        near `MONEY_MAX_VALUE` too. We don't need to reimplement
+        `compute_discount_amount` here to bound it: `discount_amount` is
+        always clamped into `[0, subtotal_amount]` by construction
+        (app/pricing.py — 'fixed' is `min(discount_value, subtotal_amount)`;
+        'percentage' is `subtotal_amount * pct / 100` with `pct` already
+        checked <= 100.00 by `_validate_discount_value` above). So
+        `total_amount <= subtotal_amount - 0 + tax_amount`, i.e.
+        `subtotal_amount + tax_amount` is always an upper bound on
+        `total_amount` regardless of discount. Checking that sum is
+        therefore sufficient without duplicating the discount math (and
+        without drifting from it if that math ever changes).
+        """
+        subtotal_amount = sum(
+            (
+                compute_line_total(item.quantity, item.submitted_unit_price_decimal)
+                for item in self.line_items
+            ),
+            Decimal("0.00"),
+        )
+        if subtotal_amount > MONEY_MAX_VALUE:
+            raise ValueError(
+                "sum of line items (quantity x submitted_unit_price) exceeds the maximum a "
+                f"sale can hold ({MONEY_MAX_VALUE})"
+            )
+        if subtotal_amount + self.tax_amount_decimal > MONEY_MAX_VALUE:
+            raise ValueError(
+                "subtotal_amount + tax_amount exceeds the maximum total_amount can hold "
+                f"({MONEY_MAX_VALUE})"
+            )
+        return self
 
 
 class SaleResponse(BaseModel):

@@ -852,3 +852,147 @@ async def test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db(client):
     assert list_resp.status_code == 200, list_resp.text
     listed = next(row for row in list_resp.json() if row["client_id"] == "client-numeric-ceiling")
     assert listed["total_amount"] == ceiling_price
+
+
+# --- Digit-count ceiling on every money field sharing `validate_money_string`
+# (Efua's follow-up, closing the gap flagged alongside the quantity/line-item
+# bounds above): `submitted_unit_price`, `tax_amount`, and `discount_value`
+# (both readings) each need their own NUMERIC(12,2) ceiling
+# (`app/schemas.py` `MONEY_MAX_VALUE`), and the *aggregate* subtotal/total
+# also need a guard, since a per-field bound can't constrain a product
+# (quantity x price) or a sum across line items. See
+# `_validate_sale_totals_within_numeric_ceiling` in app/schemas.py for the
+# arithmetic.
+
+MONEY_CEILING = "9999999999.99"  # NUMERIC(12,2) max: 10 integer digits + 2dp
+OVER_CEILING = "10000000000.00"  # one pesewa's worth of "1" past the ceiling
+
+
+async def test_rejects_submitted_unit_price_above_ceiling(client):
+    seed = client.seed
+    payload = _sale_payload(seed, client_id="client-unitprice-over", quantity=1, unit_price=OVER_CEILING)
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_rejects_tax_amount_above_ceiling(client):
+    seed = client.seed
+    payload = _sale_payload(seed, client_id="client-tax-over", tax=OVER_CEILING)
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_rejects_fixed_discount_value_above_ceiling(client):
+    """`discount_value` as 'fixed' is a GHS amount (money), not a
+    percentage — it must be bounded the same as every other money field."""
+    seed = client.seed
+    payload = _sale_payload(
+        seed, client_id="client-discount-fixed-over", discount_type="fixed", discount_value=OVER_CEILING
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_percentage_discount_value_still_accepted_up_to_100(client):
+    """Guard against the shared NUMERIC(12,2) money ceiling wrongly
+    rejecting a legitimate 'percentage' discount_value — 100.00 is nowhere
+    near MONEY_MAX_VALUE (9,999,999,999.99), so the generic bound must never
+    interfere with the tighter, percentage-specific 0-100 check."""
+    seed = client.seed
+    payload = _sale_payload(
+        seed, client_id="client-discount-pct-100", discount_type="percentage", discount_value="100.00"
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 201, resp.text
+
+
+async def test_percentage_discount_value_above_100_still_rejected_by_its_own_check(client):
+    """Unaffected by this change (100.01 is still far under MONEY_MAX_VALUE)
+    — the pre-existing percentage-specific check still does its job."""
+    seed = client.seed
+    payload = _sale_payload(
+        seed, client_id="client-discount-pct-over100", discount_type="percentage", discount_value="100.01"
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_accepts_submitted_unit_price_at_exact_ceiling_schema_layer(client):
+    """The exact boundary (9,999,999,999.99) must still validate at the
+    schema layer, independent of DB/catalog/stock concerns — the dedicated
+    real-Postgres round-trip test for this value is
+    `test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db`, above."""
+    seed = client.seed
+    product_id = await _add_product(client, seed, unit_price=Decimal(MONEY_CEILING), quantity=1)
+    payload = _sale_payload(
+        seed,
+        client_id="client-unitprice-at-ceiling",
+        quantity=1,
+        unit_price=MONEY_CEILING,
+        tax="0.00",
+        discount_value="0.00",
+        product_id=product_id,
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 201, resp.text
+
+
+async def test_rejects_aggregate_subtotal_overflow_from_many_valid_line_items(client):
+    """The exact scenario flagged in the task: 100 line items, each at
+    MAX_QUANTITY_PER_LINE_ITEM (10,000), each at a `submitted_unit_price`
+    that's individually well within MONEY_MAX_VALUE on its own —
+    10,000 x 500,000.00 = 5,000,000,000.00 per line, comfortably under the
+    9,999,999,999.99 ceiling — but which sums, across 100 line items, to
+    500,000,000,000.00: fifty times over what `sales.subtotal_amount`
+    (NUMERIC(12,2)) can hold. Rejected before any DB/catalog/stock lookup
+    (pydantic model validation), so no seeded stock is needed."""
+    seed = client.seed
+    payload = _sale_payload(seed, client_id="client-aggregate-overflow")
+    payload["line_items"] = [
+        {"product_id": str(seed["product_id"]), "quantity": 10_000, "submitted_unit_price": "500000.00"}
+        for _ in range(100)
+    ]
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_rejects_aggregate_total_overflow_from_subtotal_plus_tax(client):
+    """Distinct from the subtotal-overflow case above: subtotal_amount alone
+    is within bounds (a single line item at exactly MONEY_CEILING), but
+    adding a nonzero tax_amount would push total_amount
+    (subtotal_amount - discount_amount + tax_amount) past MONEY_MAX_VALUE.
+    Must be rejected even though discount_amount is 0 and every individual
+    field passed its own per-field bound."""
+    seed = client.seed
+    payload = _sale_payload(
+        seed,
+        client_id="client-total-overflow",
+        quantity=1,
+        unit_price=MONEY_CEILING,
+        tax="1.00",
+        discount_value="0.00",
+    )
+
+    resp = await client.post("/api/v1/sales", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
