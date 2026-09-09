@@ -27,6 +27,20 @@ import SyncBanner from "./features/sync-status/SyncBanner.jsx";
  * the whole app session. Does NOT own: what "signed in" means — that's
  * AuthProvider's job (see src/auth/AuthContext.jsx); this component only
  * reads `status` and picks what to render.
+ *
+ * BUNDLE-SIZE NOTE (Kojo, 2026-09): PosScreen/StockScreen/ExpensesScreen
+ * are deliberately NOT React.lazy-split here, even though POS is the only
+ * screen a cashier sees on landing. Stock and Expenses are two of this
+ * app's three offline-eligible write paths (CLAUDE.md — sales, stock
+ * adjustments, expenses), and this repo has no service worker/PWA caching
+ * yet (deferred per ultimate-bookkeeping-v2-outlet-ui-plan.md §4). Without
+ * that caching layer, a lazily-loaded screen chunk that was never fetched
+ * before the user went offline would fail to load exactly when they try to
+ * record a stock adjustment or expense offline — trading bundle KB for a
+ * broken offline promise. Route-splitting these two screens only saves
+ * ~6KB raw (~2% of the bundle) anyway, per the bundle report, so it isn't
+ * worth that risk. Revisit once PWA caching lands. See firebase.js /
+ * AuthContext.jsx for the deferred-loading change that *was* safe to make.
  */
 export default function App() {
   const { status, error } = useAuth();
