@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least-privilege default: nothing in this workflow needs to write to the
+# repo, open PRs, etc. Individual jobs do not escalate this.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-tests:
+    name: API tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          # No committed lockfile for the API; key the cache off the
+          # manifest that actually pins/constrains its dependencies.
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies (incl. dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest
+        # Tests run fully offline: firebase_admin is never initialized at
+        # import time (see app/auth.py), and tests/conftest.py sets
+        # RATE_LIMIT_ENABLED=false before the app is first imported. No
+        # secrets or network access required.
+        # -p no:cacheprovider avoids writing a stray .pytest_cache under
+        # apps/api in the CI workspace.
+        run: python -m pytest -v -p no:cacheprovider
+
+  js-tests:
+    name: JS tests + outlet build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces)
+        run: npm ci
+
+      # Each suite is invoked by its known script name via `npm run`, which
+      # fails the job (non-zero exit) if the script is missing or renamed —
+      # this deliberately cannot pass vacuously.
+      - name: Test — outlet app (111 tests)
+        run: npm run test:outlet
+
+      - name: Test — offline-queue package (27 tests)
+        run: npm run test:offline-queue
+
+      - name: Test — api-client package (5 tests)
+        run: npm run test:api-client
+
+      - name: Build — outlet app
+        run: npm run build:outlet
+
+  npm-audit:
+    name: npm audit (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Report-only: dependency vulnerabilities (currently all in dev
+    # tooling / transitive build deps — see infra follow-up notes) should
+    # not block merges on their own. This job is intentionally allowed to
+    # fail without failing the required checks above.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces)
+        run: npm ci
+
+      - name: npm audit (report only, non-blocking)
+        run: npm audit --audit-level=moderate
