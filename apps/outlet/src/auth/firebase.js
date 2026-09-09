@@ -98,6 +98,40 @@ let firebaseAuthPromise = null;
  * more total bytes once the deferred chunk loads — this is a real
  * tradeoff, not a pure win; see the report).
  *
+ * AUTH EMULATOR (Kojo, 2026-09): when `VITE_FIREBASE_AUTH_EMULATOR_HOST` is
+ * set (see .env.example), this calls `connectAuthEmulator` immediately
+ * after `getAuth()`, before any sign-in call can reach the network — the
+ * SDK requires that ordering (connecting the emulator after any request has
+ * gone out is a no-op at best, an assertion failure at worst; see
+ * `@firebase/auth`'s `_canInitEmulator` guard). This lets a developer run
+ * fully local (Firebase's `firebase emulators:start`, matched on the
+ * backend by Efua's `FIREBASE_AUTH_EMULATOR_HOST`) with no real GCP
+ * project — see the .env.example comments for the exact combination of
+ * vars each mode needs.
+ *
+ * Deliberately gated on nothing but that one env var being present/absent
+ * — no separate "dev mode" flag — so:
+ *   - It can never activate in a production build unless someone
+ *     explicitly ships `VITE_FIREBASE_AUTH_EMULATOR_HOST` in that build's
+ *     env, which is not something any of this repo's build/deploy config
+ *     does (see apps/outlet/README.md).
+ *   - `isFirebaseConfigured` (above) is UNCHANGED by emulator mode: the
+ *     Auth SDK's own emulator flow still requires a resolvable
+ *     `apiKey`/`projectId` shaped like real config (see
+ *     resolveFirebaseConfig) — verified directly against
+ *     `@firebase/auth`'s source rather than assumed: `authDomain` is only
+ *     asserted for popup/redirect flows (`getIframeUrl`,
+ *     `_getRedirectUrl`) this app never calls (it only uses
+ *     `signInWithEmailAndPassword`/`onAuthStateChanged`/`signOut` — see
+ *     the authSdk surface below), but `apiKey` is threaded into every
+ *     Identity Toolkit REST call the SDK makes, emulator or not. The
+ *     values can all be harmless dummies in emulator mode (the emulator
+ *     doesn't validate them against a real Google Cloud project — see
+ *     .env.example) — but they still have to be *present*, so
+ *     `isFirebaseConfigured` staying a plain "are all three set" check is
+ *     still the right test in both modes, not something emulator mode
+ *     needs to special-case.
+ *
  * @returns {Promise<{ auth: import("firebase/auth").Auth, authSdk: { onAuthStateChanged: Function, signInWithEmailAndPassword: Function, signOut: Function } } | null>}
  */
 export function loadFirebaseAuth() {
@@ -106,8 +140,27 @@ export function loadFirebaseAuth() {
   }
   if (!firebaseAuthPromise) {
     firebaseAuthPromise = Promise.all([import("firebase/app"), import("firebase/auth")]).then(
-      ([{ initializeApp }, { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut }]) => {
+      ([
+        { initializeApp },
+        { getAuth, connectAuthEmulator, onAuthStateChanged, signInWithEmailAndPassword, signOut },
+      ]) => {
         const auth = getAuth(initializeApp(config));
+
+        // See the AUTH EMULATOR doc comment above for why this is gated on
+        // this one env var alone, and why it's safe to do unconditionally
+        // (no real project ever has this var set).
+        const emulatorHost = import.meta.env.VITE_FIREBASE_AUTH_EMULATOR_HOST;
+        if (emulatorHost) {
+          // connectAuthEmulator wants a full URL (it asserts a
+          // /^https?:\/\// prefix); the env var itself deliberately stays
+          // in the same bare "host:port" shape as the backend's
+          // `FIREBASE_AUTH_EMULATOR_HOST` (the Firebase Admin SDK's own
+          // convention — see apps/api's matching support) so a developer
+          // sets the *same* value on both sides instead of a
+          // frontend-specific URL-shaped variant of it.
+          connectAuthEmulator(auth, `http://${emulatorHost}`);
+        }
+
         return { auth, authSdk: { onAuthStateChanged, signInWithEmailAndPassword, signOut } };
       }
     );
