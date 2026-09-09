@@ -9,8 +9,11 @@ second, unrelated tenant created ad hoc per test via `_create_other_tenant`.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from decimal import Decimal
+
+import pytest
 
 from app.models import Outlet, Product, User
 
@@ -23,7 +26,15 @@ async def _create_other_tenant(client):
     other_outlet_id = uuid.uuid4()
     other_product_id = uuid.uuid4()
     async with client.session_factory() as session:
+        # Flushed in dependency order (admin -> outlet/product), not a
+        # single flat add()+commit() — see tests/conftest.py's `seed`
+        # fixture for why: outlets.admin_id/products.admin_id -> users.id
+        # must exist before those rows can be inserted, which a single
+        # mixed-table flush does not reliably guarantee against a real,
+        # FK-enforcing Postgres (this failed there; passed on SQLite only
+        # because aiosqlite doesn't enforce FK constraints by default).
         session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        await session.flush()
         session.add(Outlet(id=other_outlet_id, admin_id=other_admin_id, name="Other Outlet"))
         session.add(
             Product(
@@ -172,6 +183,26 @@ async def test_admin_cannot_write_another_tenants_expense(admin_client):
     assert body["error"]["retryable"] is False
 
 
+@pytest.mark.skipif(
+    bool(os.environ.get("DATABASE_URL")),
+    reason=(
+        "The precondition this test models (a User row whose outlet_id "
+        "references a nonexistent outlet) is a genuine dangling-FK state "
+        "that SQLite happily stores (aiosqlite doesn't enforce FK "
+        "constraints by default) but a real Postgres physically cannot "
+        "reach via ORM inserts/deletes: users.outlet_id -> outlets.id is "
+        "enforced, and outlets has no ON DELETE CASCADE/SET NULL, so "
+        "deleting an outlet while a manager still references it is itself "
+        "rejected by the DB. Confirmed by running this suite against "
+        "Postgres — see backend report. `resolve_authorized_outlet`'s "
+        "OUTLET_NOT_FOUND handling for this case is being kept as "
+        "defense-in-depth (e.g. against a future ON DELETE SET NULL, or a "
+        "manual data-repair script), not deleted — only this specific "
+        "test's precondition can't be constructed on Postgres without "
+        "deliberately disabling FK enforcement, which is disproportionate "
+        "for one edge case."
+    ),
+)
 async def test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found(session_factory, seed):
     """`resolve_authorized_outlet` also covers the outlet_manager path where
     the outlet row isn't otherwise guaranteed to exist (task spec) — here

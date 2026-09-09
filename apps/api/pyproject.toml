@@ -12,6 +12,10 @@ dependencies = [
     "pydantic-settings>=2.3",
     "firebase-admin>=6.5",
     "slowapi>=0.1.9",
+    # Required at deploy time (not just dev): the deploy pipeline runs
+    # `alembic upgrade head` as an explicit migration step before the app
+    # serves traffic — see apps/api/alembic/.
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]

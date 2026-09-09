@@ -179,7 +179,12 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
     other_admin_id = uuid.uuid4()
     other_product_id = uuid.uuid4()
     async with client.session_factory() as session:
+        # See tests/test_sales.py's identical helper for why the explicit
+        # flush is required here (Postgres-only flush-ordering hazard from
+        # the outlets<->users cycle elsewhere in app/models.py's metadata —
+        # backend report).
         session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        await session.flush()
         session.add(
             Product(
                 id=other_product_id,

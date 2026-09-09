@@ -46,10 +46,20 @@ async def test_happy_path_lists_products_ordered_by_name(client):
 
 async def test_empty_catalog_returns_empty_list(client):
     seed = client.seed
-    # Delete the seeded product so this tenant's catalog is empty.
+    # Delete the seeded product (and its dependent stock_levels row first —
+    # stock_levels.product_id -> products.id has no ON DELETE
+    # CASCADE/SET NULL, so on a real FK-enforcing Postgres, deleting the
+    # product while a stock_levels row still references it raises
+    # `ForeignKeyViolationError`. Silently "worked" on SQLite only because
+    # aiosqlite doesn't enforce FK constraints by default — found running
+    # this suite against Postgres, see backend report) so this tenant's
+    # catalog is empty.
     async with client.session_factory() as session:
         from sqlalchemy import delete
 
+        from app.models import StockLevel
+
+        await session.execute(delete(StockLevel).where(StockLevel.product_id == seed["product_id"]))
         await session.execute(delete(Product).where(Product.id == seed["product_id"]))
         await session.commit()
 
@@ -81,7 +91,13 @@ async def test_admin_cannot_list_another_tenants_products(admin_client):
     other_admin_id = uuid.uuid4()
     other_outlet_id = uuid.uuid4()
     async with admin_client.session_factory() as session:
+        # Flushed admin -> outlet/product, not one flat add()+commit() —
+        # see tests/conftest.py's `seed` fixture / test_authz.py's
+        # `_create_other_tenant` for why: this must exist before
+        # outlets.admin_id/products.admin_id can reference it against a
+        # real FK-enforcing Postgres.
         session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        await session.flush()
         session.add(Outlet(id=other_outlet_id, admin_id=other_admin_id, name="Other Outlet"))
         session.add(
             Product(

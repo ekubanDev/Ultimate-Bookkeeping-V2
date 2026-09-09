@@ -165,7 +165,17 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
     other_admin_id = uuid.uuid4()
     other_product_id = uuid.uuid4()
     async with client.session_factory() as session:
+        # Explicit flush between User and Product: without it, on Postgres
+        # this Product insert can be emitted before the User insert it
+        # depends on (products.admin_id -> users.id), even though there's
+        # no cycle in this particular pair — the unresolvable outlets<->
+        # users cycle elsewhere in app/models.py's metadata appears to
+        # affect flush-ordering reliability for the whole graph, not just
+        # the two cyclic tables. Invisible on aiosqlite (FKs unenforced by
+        # default there); a real, reproducible `ForeignKeyViolationError`
+        # on Postgres — see backend report.
         session.add(User(id=other_admin_id, role="admin", display_name="Other Admin"))
+        await session.flush()
         session.add(
             Product(
                 id=other_product_id,
