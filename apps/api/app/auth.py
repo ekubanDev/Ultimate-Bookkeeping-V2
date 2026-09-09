@@ -26,9 +26,50 @@ reason (bad signature, expired, revoked, SDK not configured, network error),
 `verify_token` raises `TokenVerificationError` and the request fails closed
 with 401. The only way around real verification is the explicit
 `dependency_overrides` seam FastAPI's TestClient/AsyncClient use in tests.
+
+PROVISIONING INVARIANT (Nana's medium finding — read this before writing any
+account-creation code, in this repo or in /apps/admin):
+
+    Every Firebase user MUST be created with an *explicit* `uid` equal to
+    the intended `users.id` UUID, e.g.:
+
+        firebase_admin.auth.create_user(uid=str(user_id), ...)
+
+    `users.id` (app/models.py) is a UUID column, and `get_current_user`
+    below resolves a request's identity by parsing the verified token's
+    `uid` claim as a UUID and looking it up as `users.id` (design.md §2.2:
+    "users.id mirrors the Firebase UID"). Firebase's *default* auto-generated
+    UIDs — what you get from the Console "Add user" UI, or from
+    `create_user()` called without `uid=` — are 28-character non-UUID
+    strings. Such a uid can *never* be parsed as a UUID, so it can never
+    match any `users` row, no matter how correctly an admin later inserts
+    one. There is no provisioning tooling in this repo (outlet app only —
+    see CLAUDE.md); a Firebase-side + `users`-row provisioning flow belongs
+    in /apps/admin, and MUST:
+
+      1. Generate (or accept) the intended `users.id` UUID first.
+      2. Call `create_user(uid=str(that_uuid), ...)` — never call
+         `create_user()` without `uid=`, and never let the Console UI create
+         the account.
+      3. Insert the `users` row with that same UUID as `id`, in the same
+         logical operation (ideally with compensation/rollback if either
+         side fails, so the two can't drift out of sync).
+
+    Getting this wrong produces a token that verifies successfully — the
+    account is real, the password/SSO works — but can never resolve to a
+    `users` row. The resulting 403 (`USER_NOT_PROVISIONED`, below) is
+    indistinguishable *to the caller* from "admin hasn't provisioned this
+    account yet", even after the admin has correctly inserted the `users`
+    row, because the row's `id` and the Firebase uid can never be equal.
+    That response is deliberately uninformative (Nana: no information leak
+    to a caller, provisioned or not) — see `get_current_user`'s uid-parse
+    branch for where this gets logged server-side instead, distinctly from
+    an ordinary "not provisioned yet" case, so an operator debugging a
+    "my staff can't log in" ticket has something to go on.
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -40,6 +81,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.errors import AppError
 from app.models import User
+
+logger = logging.getLogger(__name__)
 
 # Module-level guard for the lazily-initialized Firebase Admin App. `None`
 # until the first real call to `verify_token` (never touched by tests that
@@ -144,14 +187,44 @@ async def get_current_user(
 
     # uid mirrors users.id per design.md §2.2. A uid that isn't a valid UUID
     # can't correspond to any row either way — fold it into the same
-    # "verified token, no provisioned user" outcome as a well-formed-but-
-    # unknown uid, rather than treating it as a separate auth failure.
+    # "verified token, no provisioned user" HTTP outcome as a well-formed-
+    # but-unknown uid (Nana: identical response either way, no information
+    # leak to the caller). But the two causes are categorically different
+    # operationally, so we log them distinctly, server-side only, at a level
+    # an operator will actually see — see the PROVISIONING INVARIANT note at
+    # the top of this module.
     try:
         user_id = uuid.UUID(uid)
     except ValueError:
+        # This is not "admin hasn't provisioned this account yet" — it is
+        # structurally impossible for this uid to ever match a users row
+        # (users.id is a UUID column). Overwhelmingly the most likely cause
+        # is a Firebase user created without an explicit uid= (Console UI,
+        # or create_user() with no uid kwarg), which is a provisioning bug,
+        # not a pending-provisioning state. WARNING because this needs a
+        # human to fix the *way the account was created*, not just insert a
+        # row and wait.
+        logger.warning(
+            "Auth: token uid %r is not a well-formed UUID and can never match a users.id row "
+            "(users.id is a UUID column). This is almost always caused by creating the Firebase "
+            "user without an explicit uid= (e.g. via the Console UI, or create_user() without "
+            "uid=) instead of uid=<intended users.id>. Fix: delete this Firebase user and "
+            "recreate it with uid=<users.id UUID> — see app/auth.py module docstring.",
+            uid,
+        )
         user = None
     else:
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if user is None:
+            # Ordinary, expected transient state: a well-formed uid with no
+            # matching row yet — e.g. the admin hasn't provisioned it, or
+            # provisioning is in flight. INFO, not WARNING: no action is
+            # necessarily wrong here, just not-yet-done.
+            logger.info(
+                "Auth: token uid %s is a well-formed UUID with no matching users row (verified "
+                "token, unprovisioned account).",
+                user_id,
+            )
 
     if user is None:
         raise AppError(

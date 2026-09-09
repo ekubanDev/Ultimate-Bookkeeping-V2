@@ -171,3 +171,68 @@ async def test_me_active_user_unaffected_by_is_active_check(real_auth_client, mo
     resp = await real_auth_client.get("/api/v1/me", headers={"Authorization": "Bearer whatever-token"})
 
     assert resp.status_code == 200
+
+
+async def test_non_uuid_uid_and_unknown_uuid_uid_produce_byte_identical_responses(
+    real_auth_client, monkeypatch
+):
+    """Nana's finding: the two "can't resolve this uid to a user" causes —
+    malformed (non-UUID) uid vs. well-formed-but-unknown uid — must be
+    indistinguishable to the caller (no information leak to cross-tenant
+    probing), even though they are logged distinctly server-side (see the
+    next two tests). Assert byte-identical status + body, not just "both
+    403 with the same code".
+    """
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: "not-a-uuid")
+    malformed_resp = await real_auth_client.get(
+        "/api/v1/me", headers={"Authorization": "Bearer whatever-token"}
+    )
+
+    unknown_uid = str(uuid.uuid4())
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: unknown_uid)
+    unknown_resp = await real_auth_client.get(
+        "/api/v1/me", headers={"Authorization": "Bearer whatever-token"}
+    )
+
+    assert malformed_resp.status_code == unknown_resp.status_code == 403
+    assert malformed_resp.content == unknown_resp.content
+    assert malformed_resp.headers["content-type"] == unknown_resp.headers["content-type"]
+
+
+async def test_non_uuid_uid_logs_warning_naming_the_provisioning_cause(real_auth_client, monkeypatch, caplog):
+    """The malformed-uid branch is a diagnosable provisioning bug (Firebase
+    user created without an explicit uid=), not routine "not provisioned
+    yet" — it must be logged at a level an operator will actually see
+    (WARNING), with a message that names the real cause and the fix.
+    """
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: "not-a-uuid")
+
+    with caplog.at_level("INFO", logger="app.auth"):
+        resp = await real_auth_client.get("/api/v1/me", headers={"Authorization": "Bearer whatever-token"})
+
+    assert resp.status_code == 403
+    warning_records = [r for r in caplog.records if r.name == "app.auth" and r.levelname == "WARNING"]
+    assert len(warning_records) == 1
+    message = warning_records[0].getMessage()
+    assert "not-a-uuid" in message
+    assert "uid=" in message  # names the fix (explicit uid= at Firebase user creation)
+
+
+async def test_unknown_uuid_uid_logs_info_not_warning(real_auth_client, monkeypatch, caplog):
+    """A well-formed UUID uid with no matching row is the ordinary
+    "not provisioned yet" case — logged, but not at WARNING (that's reserved
+    for the malformed-uid provisioning-bug case above), so operators can
+    triage the two differently.
+    """
+    unknown_uid = str(uuid.uuid4())
+    monkeypatch.setattr(auth_module, "verify_token", lambda token: unknown_uid)
+
+    with caplog.at_level("INFO", logger="app.auth"):
+        resp = await real_auth_client.get("/api/v1/me", headers={"Authorization": "Bearer whatever-token"})
+
+    assert resp.status_code == 403
+    auth_records = [r for r in caplog.records if r.name == "app.auth"]
+    assert len(auth_records) == 1
+    assert auth_records[0].levelname == "INFO"
+    assert unknown_uid in auth_records[0].getMessage()
+    assert not any(r.levelname == "WARNING" for r in auth_records)

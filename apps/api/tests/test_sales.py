@@ -506,3 +506,143 @@ async def test_get_sales_price_variance_flagged_filter(client):
     unflagged_body = unflagged_resp.json()
     assert [row["client_id"] for row in unflagged_body] == ["client-list-clean"]
     assert unflagged_body[0]["price_variance_flagged"] is False
+
+
+# --- GET /api/v1/sales ordering: default desc, order=asc, stable pagination
+# under tied `created_at` (Kwame's doc-pass finding) --------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+async def _insert_sale_directly(
+    client,
+    seed,
+    *,
+    client_id: str,
+    created_at: datetime,
+) -> uuid.UUID:
+    """Insert a `sales` row directly (bypassing POST /sales), so `created_at`
+    can be pinned to an exact, possibly-shared, value — the server normally
+    assigns this at commit time (design.md §3.5), which POST never lets a
+    caller control, but that's exactly the thing under test here: whether
+    listing is stable when several sales share a `created_at` (very
+    plausible when an offline queue flushes a batch on reconnect).
+    """
+    sale_id = uuid.uuid4()
+    async with client.session_factory() as session:
+        session.add(
+            Sale(
+                id=sale_id,
+                outlet_id=seed["outlet_id"],
+                client_id=client_id,
+                subtotal_amount=Decimal("15.00"),
+                total_amount=Decimal("15.00"),
+                tax_amount=Decimal("0.00"),
+                discount_type="fixed",
+                discount_value=Decimal("0.00"),
+                discount_amount=Decimal("0.00"),
+                payment_method="cash",
+                status="completed",
+                created_by=seed["manager_id"],
+                created_at=created_at,
+            )
+        )
+        await session.commit()
+    return sale_id
+
+
+async def test_get_sales_default_order_is_descending_newest_first(client):
+    seed = client.seed
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    await _insert_sale_directly(client, seed, client_id="order-oldest", created_at=base)
+    await _insert_sale_directly(client, seed, client_id="order-middle", created_at=base + timedelta(minutes=1))
+    await _insert_sale_directly(client, seed, client_id="order-newest", created_at=base + timedelta(minutes=2))
+
+    resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
+
+    assert resp.status_code == 200, resp.text
+    assert [row["client_id"] for row in resp.json()] == ["order-newest", "order-middle", "order-oldest"]
+
+
+async def test_get_sales_order_asc_param_is_chronological(client):
+    seed = client.seed
+    base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    await _insert_sale_directly(client, seed, client_id="order-oldest", created_at=base)
+    await _insert_sale_directly(client, seed, client_id="order-middle", created_at=base + timedelta(minutes=1))
+    await _insert_sale_directly(client, seed, client_id="order-newest", created_at=base + timedelta(minutes=2))
+
+    resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"]), "order": "asc"})
+
+    assert resp.status_code == 200, resp.text
+    assert [row["client_id"] for row in resp.json()] == ["order-oldest", "order-middle", "order-newest"]
+
+
+async def test_get_sales_invalid_order_param_is_422(client):
+    seed = client.seed
+    resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"]), "order": "sideways"})
+
+    assert resp.status_code == 422, resp.text
+
+
+async def test_get_sales_pagination_stable_across_tied_created_at_desc(client):
+    """The important one: several sales sharing the exact same `created_at`
+    (plausible when an offline queue flushes a batch on reconnect) must
+    still page deterministically — every row exactly once, no duplicates,
+    no omissions — under the default `order=desc` with a small `limit`.
+    Without the `Sale.id` tiebreaker, an unstable sort could reorder tied
+    rows between the two page fetches below and drop or duplicate one.
+    """
+    seed = client.seed
+    tied_at = datetime(2026, 2, 1, 9, 30, 0, tzinfo=timezone.utc)
+    client_ids = [f"tied-{i}" for i in range(7)]
+    for cid in client_ids:
+        await _insert_sale_directly(client, seed, client_id=cid, created_at=tied_at)
+
+    seen: list[str] = []
+    offset = 0
+    limit = 3
+    for _ in range(10):  # generous upper bound on the number of pages needed
+        resp = await client.get(
+            "/api/v1/sales",
+            params={"outlet_id": str(seed["outlet_id"]), "limit": limit, "offset": offset},
+        )
+        assert resp.status_code == 200, resp.text
+        page = [row["client_id"] for row in resp.json()]
+        if not page:
+            break
+        seen.extend(page)
+        offset += limit
+
+    assert sorted(seen) == sorted(client_ids)
+    assert len(seen) == len(client_ids)  # no duplicates
+    assert len(set(seen)) == len(client_ids)  # no duplicates, alternate check
+
+
+async def test_get_sales_pagination_stable_across_tied_created_at_asc(client):
+    """Same as above, mirrored for `order=asc` — the tiebreaker must apply
+    (in matching direction) on both sort directions, not just the default.
+    """
+    seed = client.seed
+    tied_at = datetime(2026, 2, 1, 9, 30, 0, tzinfo=timezone.utc)
+    client_ids = [f"tied-asc-{i}" for i in range(7)]
+    for cid in client_ids:
+        await _insert_sale_directly(client, seed, client_id=cid, created_at=tied_at)
+
+    seen: list[str] = []
+    offset = 0
+    limit = 3
+    for _ in range(10):
+        resp = await client.get(
+            "/api/v1/sales",
+            params={"outlet_id": str(seed["outlet_id"]), "order": "asc", "limit": limit, "offset": offset},
+        )
+        assert resp.status_code == 200, resp.text
+        page = [row["client_id"] for row in resp.json()]
+        if not page:
+            break
+        seen.extend(page)
+        offset += limit
+
+    assert sorted(seen) == sorted(client_ids)
+    assert len(seen) == len(client_ids)
+    assert len(set(seen)) == len(client_ids)

@@ -144,13 +144,16 @@ Admin/outlet_manager with permission only. Not offline-eligible — voids happen
 { "reason": "customer return" }
 ```
 
-### `GET /api/v1/sales?outlet_id=&from=&to=&price_variance_flagged=&limit=&offset=`
-Paginated, `created_at`-ordered — **ascending** (oldest first), never `device_recorded_at` — per design doc §3.5.
+### `GET /api/v1/sales?outlet_id=&from=&to=&price_variance_flagged=&order=&limit=&offset=`
+Paginated, `created_at`-ordered — never `device_recorded_at`, per design doc §3.5. Defaults to **descending** (newest first): the primary consumers are recent-sales review and the `price_variance_flagged` review queue, for which oldest-first page 1 is the wrong result. `order=asc` remains available for chronological ledger export.
+
+`id` is applied as a secondary sort key in the same direction. This is not cosmetic: `created_at` is server-assigned at commit, so ties are expected when an offline queue flushes a batch on reconnect, and an unstable sort under `limit`/`offset` would silently drop or duplicate rows across pages.
 
 Query params:
 - `outlet_id` — same resolution rule as §1 (ignored for `outlet_manager`, required and ownership-checked for `admin`).
 - `from` / `to` — optional ISO 8601 timestamps, inclusive bounds on `created_at`. (`from` is the query param name; it's an aliased field server-side since `from` is a reserved word.)
 - `price_variance_flagged` — optional boolean filter. When present, filters to sales where *any* line item's `price_variance_flagged` matches the requested value (OR across the sale's line items — same aggregation `POST /sales`'s response uses).
+- `order` — optional `asc`|`desc`, default `desc`. Anything else is a `422 VALIDATION_ERROR`.
 - `limit` — default `50`, max `200`. `offset` — default `0`. Same convention as `GET /products`.
 
 **Response `200`:** list of `SaleListItemResponse` — mirrors the `POST /sales` response shape minus `idempotent_replay` (meaningless outside a single-write response), plus `outlet_id` and `payment_method`:

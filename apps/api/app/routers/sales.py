@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import select
@@ -247,24 +248,47 @@ async def list_sales(
     # needs (task spec). `None` (default) means "no filter", matching every
     # other optional query param on this endpoint.
     price_variance_flagged: bool | None = Query(default=None),
+    # Ordering (Kwame's doc-pass finding): default is now DESCENDING
+    # (newest-first) — with `limit`/`offset` pagination, an ascending
+    # default means page 1 is always the oldest sales ever recorded, which
+    # is wrong for every known consumer of this endpoint (a recent-sales
+    # review, and especially the `price_variance_flagged` review queue this
+    # endpoint exists to serve). `order=asc` is kept available so a
+    # chronological ledger export is still possible without a code change.
+    order: Literal["asc", "desc"] = Query(default="desc"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> list[SaleListItemResponse]:
-    """api-contracts.md §2: `GET /api/v1/sales?outlet_id=&from=&to=`,
+    """api-contracts.md §2: `GET /api/v1/sales?outlet_id=&from=&to=&order=`,
     paginated, `created_at`-ordered (never `device_recorded_at` — design.md
-    §3.5). Outlet scoping mirrors POST /sales / GET /stock/levels via the
-    shared `resolve_authorized_outlet` helper.
+    §3.5), newest-first by default (`order=desc`); `order=asc` for a
+    chronological export. Outlet scoping mirrors POST /sales / GET
+    /stock/levels via the shared `resolve_authorized_outlet` helper.
+
+    Tiebreaker: `created_at` is server-assigned at commit time, and ties are
+    plausible — most notably when an offline queue flushes a batch of sales
+    on reconnect and several commit within the same DB clock tick. Sorting
+    on `created_at` alone is therefore not a stable sort order: two rows
+    with equal `created_at` can be returned in either relative order on
+    different pages, which can drop or duplicate rows under `limit`/`offset`
+    pagination. `Sale.id` (unique, never reused) is added as a secondary
+    sort key, in the same direction as `order`, purely to make the sort
+    total and pagination stable — it carries no chronological meaning of
+    its own.
     """
     resolved_outlet = await resolve_authorized_outlet(db, current_user, outlet_id)
     target_outlet_id = resolved_outlet.id
 
+    order_columns = (
+        (Sale.created_at.desc(), Sale.id.desc()) if order == "desc" else (Sale.created_at.asc(), Sale.id.asc())
+    )
     query = (
         select(Sale)
         .where(Sale.outlet_id == target_outlet_id)
         .options(selectinload(Sale.line_items))
-        .order_by(Sale.created_at)
+        .order_by(*order_columns)
     )
     if from_ is not None:
         query = query.where(Sale.created_at >= from_)
