@@ -1,6 +1,9 @@
 # JS/TS
 node_modules/
 dist/
+# Bundle-analysis output (rollup-plugin-visualizer et al) — regenerated on
+# demand, never a build input.
+dist-analyze/
 *.local
 
 # Python (apps/api)
