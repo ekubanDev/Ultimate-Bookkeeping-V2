@@ -27,6 +27,13 @@ reason (bad signature, expired, revoked, SDK not configured, network error),
 with 401. The only way around real verification is the explicit
 `dependency_overrides` seam FastAPI's TestClient/AsyncClient use in tests.
 
+LOCAL DEV: for running the server itself (not tests) without real Firebase
+credentials, see `_ensure_firebase_app`'s docstring below for how the
+Firebase Auth emulator (`FIREBASE_AUTH_EMULATOR_HOST`) fits in — it is a
+local-development-only affordance with no code branch of its own in this
+module; the Admin SDK honours that variable natively. Its absence changes
+nothing about the fail-closed behavior described above.
+
 PROVISIONING INVARIANT (Nana's medium finding — read this before writing any
 account-creation code, in this repo or in /apps/admin):
 
@@ -109,6 +116,55 @@ def _ensure_firebase_app():
 
     `firebase_admin` is imported inside this function, not at module import
     time, so `import app.auth` never requires credentials or network access.
+
+    LOCAL DEV ONLY — Firebase Auth emulator (`FIREBASE_AUTH_EMULATOR_HOST`):
+
+    This function does nothing special to support the emulator — there is no
+    branch on `FIREBASE_AUTH_EMULATOR_HOST` anywhere in this module, and that
+    is deliberate. `firebase_admin`/`google-auth` already honour that env var
+    natively, entirely below this codebase:
+
+      - `firebase_admin.auth.verify_id_token` (called from `verify_token`
+        below) checks `FIREBASE_AUTH_EMULATOR_HOST` itself. When set, it
+        trusts the emulator's unsigned tokens and verifies them locally
+        (issuer/audience/subject checks only) instead of fetching Google's
+        public signing certs and checking a real signature — no network call
+        to Google is made either way once the var is set.
+      - Because of that, real Application Default Credentials are never
+        actually needed to verify a token against the emulator — only a
+        resolvable project id is (see `App._lookup_project_id`), which
+        `FIREBASE_PROJECT_ID` already provides via `options["projectId"]`
+        above. `credentials.ApplicationDefault()` is constructed either way,
+        but its lazy `get_credential()` is never invoked on this path, so a
+        developer with no service-account key and no `gcloud auth
+        application-default login` can still verify tokens purely against a
+        locally-running `firebase emulators:start --only auth`.
+      - This was verified by hand against a real `firebase emulators:start
+        --only auth` instance (see apps/api/README.md "Firebase Auth
+        emulator" section) — an emulator-issued ID token round-tripped
+        through this exact function with no credentials configured at all.
+
+    Net effect: setting `FIREBASE_AUTH_EMULATOR_HOST` (+ `FIREBASE_PROJECT_ID`,
+    any string — it just has to match what the developer's emulator/dev
+    Firebase config uses, it is never a real GCP project) is a pure
+    environment-level affordance, not a code path this module adds or could
+    accidentally leave enabled. Its ABSENCE changes nothing about today's
+    fail-closed behavior (see `verify_token`'s docstring and the module
+    docstring above) — with no `FIREBASE_AUTH_EMULATOR_HOST` set, this
+    function behaves exactly as it did before the emulator was ever
+    considered: real ADC, real signature verification, real network calls to
+    Google, fail closed on any problem.
+
+    NEVER set `FIREBASE_AUTH_EMULATOR_HOST` outside a developer's own machine
+    or CI. A deployed environment with this variable set would accept ANY
+    locally-forged, unsigned "ID token" for ANY uid — that is what makes the
+    emulator useful for local development and exactly why it must never be
+    reachable from a production configuration. There is deliberately no
+    runtime guard against this in application code (an allowlist of
+    "safe" hosts would be trivially spoofable and would just move the trust
+    boundary rather than remove it) — this is a deployment-hygiene
+    requirement: production secrets/env templates must never define this
+    variable, and `apps/api/.env.example` documents it as local-dev-only.
     """
     global _firebase_app
     if _firebase_app is not None:
@@ -120,6 +176,21 @@ def _ensure_firebase_app():
     if firebase_admin._apps:  # an app was already initialized elsewhere (e.g. by another module/process)
         _firebase_app = firebase_admin.get_app()
         return _firebase_app
+
+    if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        # Loud, unmissable, server-side-only signal that this process is
+        # willing to accept emulator-issued (unsigned) tokens. Never gates
+        # behavior — see the docstring above — purely so an operator
+        # tailing logs on a real deployment notices immediately if this
+        # variable is ever set somewhere it shouldn't be.
+        logger.warning(
+            "FIREBASE_AUTH_EMULATOR_HOST=%s is set: this process will accept "
+            "Firebase Auth EMULATOR tokens (unsigned, any uid) instead of "
+            "verifying real Firebase ID tokens. This is a local-development-"
+            "only affordance (see app/auth.py, apps/api/.env.example) and "
+            "must NEVER be set in a deployed/production environment.",
+            os.environ["FIREBASE_AUTH_EMULATOR_HOST"],
+        )
 
     options: dict[str, str] = {}
     project_id = os.environ.get("FIREBASE_PROJECT_ID")
