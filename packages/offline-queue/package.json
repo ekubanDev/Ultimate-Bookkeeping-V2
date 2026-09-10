@@ -1,0 +1,19 @@
+{
+  "name": "@ub/offline-queue",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared offline-write queue for sales, stock adjustments, and expenses. See ultimate-bookkeeping-v2-design.md §3.",
+  "type": "module",
+  "main": "index.js",
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ub/api-client": "*"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "vitest": "^1.6.1"
+  }
+}

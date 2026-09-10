@@ -1,0 +1,31 @@
+# JS/TS
+node_modules/
+dist/
+# Bundle-analysis output (rollup-plugin-visualizer et al) — regenerated on
+# demand, never a build input.
+dist-analyze/
+*.local
+
+# Python (apps/api)
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Service-account keys and other credentials. A Firebase Admin SDK key
+# grants full project access (minting tokens, impersonating any user) — it
+# must never reach the repo. Point GOOGLE_APPLICATION_CREDENTIALS at a path
+# outside the working tree, or use one of these names if you must keep it here.
+*serviceAccount*.json
+*service-account*.json
+*-adminsdk-*.json
+*.pem
+*.p12
+
+# Env & editor
+.env
+.env.*
+!.env.example
+!apps/outlet/.env.example
+.DS_Store

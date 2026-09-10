@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least-privilege default: nothing in this workflow needs to write to the
+# repo, open PRs, etc. Individual jobs do not escalate this.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-tests:
+    name: API tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          # No committed lockfile for the API; key the cache off the
+          # manifest that actually pins/constrains its dependencies.
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies (incl. dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest
+        # Tests run fully offline: firebase_admin is never initialized at
+        # import time (see app/auth.py), and tests/conftest.py sets
+        # RATE_LIMIT_ENABLED=false before the app is first imported. No
+        # secrets or network access required.
+        # -p no:cacheprovider avoids writing a stray .pytest_cache under
+        # apps/api in the CI workspace.
+        # DATABASE_URL is deliberately unset here: tests/conftest.py falls
+        # back to an in-memory SQLite engine, so this job stays fast and
+        # needs no service container. This is a good, quick signal but
+        # does NOT verify NUMERIC(12,2) precision, the partial unique index
+        # on stock_movements, enum-as-varchar round-tripping, or asyncpg
+        # prepared-statement behaviour — see the api-tests-postgres job
+        # below for that.
+        run: python -m pytest -v -p no:cacheprovider
+
+  api-tests-postgres:
+    name: API tests (pytest, Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/api
+    # This is the job that actually protects the money paths: it runs the
+    # exact same test suite as api-tests, but against real Postgres via
+    # asyncpg (production's driver), catching things aiosqlite structurally
+    # can't — NUMERIC(12,2) precision, the partial unique index on
+    # stock_movements (postgresql_where), enum-as-varchar round-tripping,
+    # and FK enforcement (aiosqlite doesn't enforce FKs by default; a real
+    # Postgres does — see tests/conftest.py and tests/test_authz.py for
+    # cases this genuinely caught).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ubk
+          POSTGRES_PASSWORD: ubk
+          POSTGRES_DB: ultimate_bookkeeping_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://ubk:ubk@localhost:5432/ultimate_bookkeeping_ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/api/pyproject.toml
+
+      - name: Install dependencies (incl. dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Alembic round-trip check against a fresh Postgres
+        # Applies the real migration set (what deployment runs) to an
+        # empty database, then re-runs autogenerate and asserts the diff
+        # is empty — catches model/migration drift (missing columns,
+        # wrong NUMERIC scale, a dropped partial index, etc.) on every PR,
+        # not just when someone remembers to check by hand.
+        run: |
+          alembic upgrade head
+          alembic check
+
+      - name: Run pytest against Postgres
+        # tests/conftest.py picks up DATABASE_URL (set at job level above)
+        # and runs the whole suite against it instead of in-memory SQLite,
+        # with schema created/torn down per test for isolation. Same test
+        # files as api-tests — no duplicated test code.
+        run: python -m pytest -v -p no:cacheprovider
+
+  js-tests:
+    name: JS tests + outlet build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces)
+        run: npm ci
+
+      # Each suite is invoked by its known script name via `npm run`, which
+      # fails the job (non-zero exit) if the script is missing or renamed —
+      # this deliberately cannot pass vacuously.
+      - name: Test — outlet app (111 tests)
+        run: npm run test:outlet
+
+      - name: Test — offline-queue package (27 tests)
+        run: npm run test:offline-queue
+
+      - name: Test — api-client package (5 tests)
+        run: npm run test:api-client
+
+      - name: Build — outlet app
+        run: npm run build:outlet
+
+  npm-audit:
+    name: npm audit (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Report-only: dependency vulnerabilities (currently all in dev
+    # tooling / transitive build deps — see infra follow-up notes) should
+    # not block merges on their own. This job is intentionally allowed to
+    # fail without failing the required checks above.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (npm workspaces)
+        run: npm ci
+
+      - name: npm audit (report only, non-blocking)
+        run: npm audit --audit-level=moderate
