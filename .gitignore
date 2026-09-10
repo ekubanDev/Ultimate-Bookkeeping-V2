@@ -13,6 +13,16 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Service-account keys and other credentials. A Firebase Admin SDK key
+# grants full project access (minting tokens, impersonating any user) — it
+# must never reach the repo. Point GOOGLE_APPLICATION_CREDENTIALS at a path
+# outside the working tree, or use one of these names if you must keep it here.
+*serviceAccount*.json
+*service-account*.json
+*-adminsdk-*.json
+*.pem
+*.p12
+
 # Env & editor
 .env
 .env.*
