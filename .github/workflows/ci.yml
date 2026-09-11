@@ -142,13 +142,16 @@ jobs:
       # Each suite is invoked by its known script name via `npm run`, which
       # fails the job (non-zero exit) if the script is missing or renamed —
       # this deliberately cannot pass vacuously.
-      - name: Test — outlet app (111 tests)
+      # Counts in these labels drift silently — they were 111/27/5 while the
+      # suites had grown to 176/46/10. They're a reading aid, not an
+      # assertion; the `npm run` invocation is what actually gates.
+      - name: Test — outlet app (176 tests)
         run: npm run test:outlet
 
-      - name: Test — offline-queue package (27 tests)
+      - name: Test — offline-queue package (46 tests)
         run: npm run test:offline-queue
 
-      - name: Test — api-client package (5 tests)
+      - name: Test — api-client package (10 tests)
         run: npm run test:api-client
 
       - name: Build — outlet app

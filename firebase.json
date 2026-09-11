@@ -1,0 +1,81 @@
+{
+  "//": [
+    "Firebase Hosting config for the outlet PWA. Note apps/api/firebase.json is a",
+    "SEPARATE, unrelated file that configures only the local Auth emulator — this",
+    "one is the deploy config and is used from the repo root.",
+    "",
+    "The /api/** rewrite is load-bearing, not a convenience. packages/api-client",
+    "hardcodes a relative API_BASE ('/api/v1') so a Firebase bearer token can",
+    "never be sent cross-origin. That only holds if the API answers on the SAME",
+    "origin as the app, which this rewrite is what accomplishes: the browser sees",
+    "one origin, Hosting forwards /api/** to Cloud Run server-side. Point the app",
+    "at an absolute API URL instead and you reintroduce exactly the cross-origin",
+    "token exposure the relative base exists to prevent.",
+    "",
+    "Rewrite ORDER matters: the SPA catch-all below would swallow /api/** if it",
+    "came first, and the failure mode is index.html returned with a 200 where",
+    "JSON was expected."
+  ],
+  "hosting": {
+    "public": "apps/outlet/dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "ultimate-bookkeeping-api",
+          "region": "europe-west1"
+        }
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ],
+    "headers": [
+      {
+        "//": [
+          "Vite emits content-hashed filenames for everything under /assets, so a",
+          "given URL's bytes never change — immutable is safe and means repeat",
+          "visits on a patchy mobile connection re-fetch nothing."
+        ],
+        "source": "/assets/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+        ]
+      },
+      {
+        "//": [
+          "The service worker and its registration shim must NOT be cached. These",
+          "filenames are stable across builds, so a cached copy pins a device to",
+          "an old precache manifest — the update prompt (src/pwa/UpdatePrompt.jsx)",
+          "would then never fire, and a cashier stays on a stale build",
+          "indefinitely. This is the one file where a cache hit is a bug."
+        ],
+        "source": "/@(sw.js|registerSW.js|workbox-*.js)",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+        ]
+      },
+      {
+        "//": [
+          "index.html is the entry point that references the hashed assets; caching",
+          "it would serve old asset URLs after a deploy."
+        ],
+        "source": "/index.html",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+        ]
+      },
+      {
+        "//": "Baseline hardening. The API sets its own headers on /api/** responses.",
+        "source": "**",
+        "headers": [
+          { "key": "X-Content-Type-Options", "value": "nosniff" },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+        ]
+      }
+    ]
+  }
+}

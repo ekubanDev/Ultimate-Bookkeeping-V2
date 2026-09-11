@@ -1,0 +1,193 @@
+name: Deploy
+
+# MANUAL ONLY, deliberately. The obvious alternative — deploy on every push
+# to main — is not enabled yet because nobody has watched this pipeline
+# succeed even once. Turn it on (add `push: branches: [main]`) after the
+# first few manual runs, not before: an automatic first deploy means
+# discovering the pipeline is broken at the same moment you discover
+# production is down.
+#
+# Deploys three artifacts in a fixed order, and the order is the whole point:
+#   1. Build and push the API image.
+#   2. Run `alembic upgrade head` from THAT image, as a Cloud Run Job, and
+#      wait for it. Schema must be ahead of code before any instance serves.
+#   3. Deploy the Cloud Run service, then Firebase Hosting.
+# A failure at step 2 leaves the previous revision serving traffic against
+# the previous schema — which is the correct thing to do.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+  # Required by google-github-actions/auth for Workload Identity Federation.
+  id-token: write
+
+concurrency:
+  # Never two deploys at once: concurrent `alembic upgrade head` runs against
+  # one database is the failure this guards. cancel-in-progress is false —
+  # cancelling a half-finished migration is worse than queueing behind it.
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ultimate-bookkeeping-v2
+  REGION: europe-west1
+  SERVICE: ultimate-bookkeeping-api
+  REPOSITORY: ultimate-bookkeeping
+  # Must match the region/serviceId in the root firebase.json's /api/**
+  # rewrite. If you change either, change both — a mismatch shows up as the
+  # SPA's index.html being returned for API calls, with a 200 status.
+
+jobs:
+  guard:
+    name: Confirm intent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation input
+        if: ${{ github.event.inputs.confirm != 'deploy' }}
+        run: |
+          echo "Refusing to deploy: type 'deploy' in the confirm input." >&2
+          exit 1
+
+  deploy:
+    name: Build, migrate, deploy
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A GitHub Environment gives this a required-reviewer gate and an audit
+    # trail. Configure "production" in Settings -> Environments; until you do,
+    # this line is inert rather than protective.
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Keyless. No service-account JSON key is stored in GitHub secrets —
+      # see apps/api/scripts/seed_dev.py's notes on why a long-lived key is
+      # the thing you least want sitting in a CI provider. Setup is documented
+      # in README; it needs a Workload Identity Pool bound to this repo.
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      # Tag by commit SHA, never `latest`: the SHA is what makes a rollback
+      # ("deploy the previous tag") a real operation rather than a guess about
+      # which build `latest` currently points at.
+      - name: Build and push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${GITHUB_SHA}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          gcloud builds submit apps/api \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --tag "${IMAGE}"
+
+      # Migrations run from the image just built, so the schema change and the
+      # code expecting it are the same artifact — not two checkouts that could
+      # drift. --wait makes the job's exit status gate everything below.
+      - name: Run database migrations
+        run: |
+          gcloud run jobs deploy "${SERVICE}-migrate" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --image "${IMAGE}" \
+            --set-cloudsql-instances "${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
+            --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
+            --set-secrets "DATABASE_URL=database-url:latest" \
+            --command alembic \
+            --args upgrade,head \
+            --max-retries 0 \
+            --task-timeout 10m
+
+          gcloud run jobs execute "${SERVICE}-migrate" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --wait
+
+      - name: Deploy Cloud Run service
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --project "${PROJECT_ID}" \
+            --region "${REGION}" \
+            --image "${IMAGE}" \
+            --platform managed \
+            --set-cloudsql-instances "${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
+            --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ secrets.CLOUD_SQL_CONNECTION_NAME }},FIREBASE_PROJECT_ID=${PROJECT_ID}" \
+            --set-secrets "DATABASE_URL=database-url:latest" \
+            --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
+            --min-instances 0 \
+            --max-instances 10 \
+            --cpu 1 \
+            --memory 512Mi \
+            --timeout 60s \
+            --no-allow-unauthenticated
+          # --no-allow-unauthenticated: the service is NOT public. Firebase
+          # Hosting's rewrite invokes it as an authenticated caller, so the
+          # only route in is through Hosting — which is what keeps the app
+          # same-origin. Making this public would let a client reach the API
+          # directly on its *.run.app origin, reintroducing the cross-origin
+          # path packages/api-client/_base.js exists to prevent.
+          #
+          # FIREBASE_AUTH_EMULATOR_HOST is deliberately absent and must stay
+          # absent: app/auth.py accepts emulator-signed tokens when it is set,
+          # which in a deployed environment means accepting forged identities.
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # These VITE_* values are compiled into the client bundle and are
+      # readable by anyone who opens devtools — they are `vars`, not
+      # `secrets`, because treating them as secret implies a confidentiality
+      # they do not have. Firebase's security comes from Auth tokens and
+      # rules, not from hiding the project id. (The service-account key is the
+      # actual secret, and it is not here — it never leaves Secret Manager.)
+      - name: Build outlet app
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+        run: npm run build:outlet
+
+      - name: Verify emulator host did not leak into the bundle
+        # A build that shipped VITE_FIREBASE_AUTH_EMULATOR_HOST would point
+        # real cashiers' sign-in at a local emulator that does not exist.
+        # Cheap assertion on the actual artifact rather than trust in the env.
+        run: |
+          if grep -rq "VITE_FIREBASE_AUTH_EMULATOR_HOST\|9099" apps/outlet/dist/assets/ 2>/dev/null; then
+            echo "Emulator host referenced in production bundle — refusing to deploy." >&2
+            exit 1
+          fi
+
+      - name: Deploy Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: ultimate-bookkeeping-v2
+          channelId: live
+
+      - name: Summary
+        run: |
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hosting: https://${PROJECT_ID}.web.app" >> "$GITHUB_STEP_SUMMARY"
