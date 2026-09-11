@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 105, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres
+cd apps/api && pytest                       # 120, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 119 + 1 skipped
 
 npm run test:outlet          # 176
 npm run test:offline-queue   # 46
@@ -127,6 +127,19 @@ npm run build:outlet
 CI runs all of these on every PR, including the Postgres job — SQLite does
 not enforce `NUMERIC(12,2)` precision or foreign keys, so the Postgres run
 is what actually protects the money paths.
+
+That same FK enforcement is why the Postgres run reports one skip:
+`test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
+`users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
+and Postgres physically refuses. The skip is deliberate and explained at the
+`skipif` in `tests/test_authz.py` — a Postgres run of 119 passed / 1 skipped
+is the expected green result, not a masked failure.
+
+The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
+forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 176
+whether or not you followed the `cp .env.example .env.local` step above.
+Don't remove that override — without it, the tests asserting the Firebase
+SDK is never loaded when unconfigured will instead initialize it for real.
 
 ---
 

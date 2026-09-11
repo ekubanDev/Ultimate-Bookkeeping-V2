@@ -33,14 +33,24 @@ describe("resolveFirebaseConfig", () => {
 });
 
 describe("loadFirebaseAuth", () => {
-  // No .env is loaded for tests (see .env.example — VITE_FIREBASE_* is
-  // unset here), so isFirebaseConfigured is false in this suite the same
-  // way it would be for a real unconfigured deployment. That's exactly the
-  // path this test exercises: it doesn't require mocking the Firebase SDK
-  // at all, because loadFirebaseAuth() must resolve to null WITHOUT ever
-  // attempting the dynamic import("firebase/auth") when unconfigured —
-  // the whole point of keeping isFirebaseConfigured a synchronous, SDK-free
-  // check (see firebase.js's bundle-size note).
+  // VITE_FIREBASE_* are forced blank by vitest.config.js's `test.env` (see
+  // the note there), so isFirebaseConfigured is false in this suite the
+  // same way it would be for a real unconfigured deployment. That override
+  // is load-bearing, not belt-and-braces: do NOT assume "tests don't load
+  // .env" — Vitest inherits Vite's env loading, so a developer following
+  // README's `cp .env.example .env.local` step populates import.meta.env
+  // for the test run too. This suite previously did assume that, and the
+  // three tests below flipped from passing to failing purely on whether
+  // .env.local existed on disk.
+  //
+  // That's exactly the path this test exercises: it doesn't require mocking
+  // the Firebase SDK at all, because loadFirebaseAuth() must resolve to
+  // null WITHOUT ever attempting the dynamic import("firebase/auth") when
+  // unconfigured — the whole point of keeping isFirebaseConfigured a
+  // synchronous, SDK-free check (see firebase.js's bundle-size note). Note
+  // the failure mode if the override regresses: with real config present
+  // these tests don't just fail, they actually initialize the live SDK,
+  // which is the precise thing they exist to prove never happens.
   it("confirms this environment is unconfigured, matching production's 'no .env vars set' case", () => {
     expect(isFirebaseConfigured).toBe(false);
   });
