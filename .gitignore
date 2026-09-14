@@ -29,3 +29,14 @@ __pycache__/
 !.env.example
 !apps/outlet/.env.example
 .DS_Store
+
+# Firebase CLI / emulator debug logs. Untracked churn, but the reason
+# they're ignored rather than just deleted is that they're durable
+# artifacts of commands whose output is not meant to be durable — the
+# emulator ones carry the operator's CLI-auth Google account, and the
+# same CLI writes these next to any command you run, including ones
+# whose stdout carries one-time credentials (see the reset-link warning
+# in apps/api/scripts/seed_dev.py's `_seed_firebase_real_users`).
+*-debug.log
+firebase-debug.log
+ui-debug.log

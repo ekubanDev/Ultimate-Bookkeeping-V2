@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 105, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres
+cd apps/api && pytest                       # 120, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 119 + 1 skipped
 
 npm run test:outlet          # 176
 npm run test:offline-queue   # 46
@@ -127,6 +127,19 @@ npm run build:outlet
 CI runs all of these on every PR, including the Postgres job — SQLite does
 not enforce `NUMERIC(12,2)` precision or foreign keys, so the Postgres run
 is what actually protects the money paths.
+
+That same FK enforcement is why the Postgres run reports one skip:
+`test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
+`users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
+and Postgres physically refuses. The skip is deliberate and explained at the
+`skipif` in `tests/test_authz.py` — a Postgres run of 119 passed / 1 skipped
+is the expected green result, not a masked failure.
+
+The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
+forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 176
+whether or not you followed the `cp .env.example .env.local` step above.
+Don't remove that override — without it, the tests asserting the Firebase
+SDK is never loaded when unconfigured will instead initialize it for real.
 
 ---
 
@@ -139,6 +152,55 @@ is what actually protects the money paths.
   is untested — only the emulator path and the credential-less fail-closed
   path have been verified.
 - **Windows** is unverified; everything above was run on Linux.
-- **Deployment** must run `alembic upgrade head` before serving traffic. The
-  managed-Postgres provider decision is still open — see the analysis in the
-  PR discussion.
+- **The deploy pipeline has never been run.** It is written
+  (`.github/workflows/deploy.yml`) but no deploy has happened, and the
+  Dockerfile has not yet been built even locally. Treat the first run as an
+  experiment, not a routine.
+
+---
+
+## Deployment
+
+Firebase Hosting serves the outlet PWA and rewrites `/api/**` to the API on
+Cloud Run, with Postgres on Cloud SQL. The rewrite is what keeps the app and
+the API **same-origin**, which the relative `API_BASE` depends on — see the
+note in `firebase.json`. Don't split them across origins.
+
+One-time setup (idempotent, safe to re-run):
+
+```bash
+./infra/bootstrap-gcp.sh --dry-run    # inspect first
+./infra/bootstrap-gcp.sh
+```
+
+That creates the Artifact Registry repo, two least-privilege service
+accounts, a Workload Identity pool/provider bound to this repo, and an empty
+`database-url` secret — then prints the GitHub secrets and variables to set
+and the remaining manual steps.
+
+It deliberately does **not** create the Cloud SQL instance: that is the only
+resource that bills continuously from the moment it exists (~$10–25/month on
+`db-f1-micro`, no scale-to-zero), so it stays an explicit command you run
+yourself. The script prints it.
+
+Deploys are **manual** (Actions → Deploy → type `deploy`). Automatic
+deploy-on-merge is deliberately not enabled until the pipeline has been
+watched to succeed a few times.
+
+Two properties worth preserving if you change any of this:
+
+- **`alembic upgrade head` runs as a Cloud Run Job, from the image just
+  built, and must succeed before the service deploys.** A migration failure
+  leaves the previous revision serving against the previous schema. Running
+  migrations from the container entrypoint instead would race every instance
+  Cloud Run starts against every other one.
+- **The Cloud Run service is `--no-allow-unauthenticated`.** Hosting invokes
+  it as an authenticated caller, so the only route in is through Hosting.
+  Making it public would give clients a second, cross-origin path to the API
+  on its `*.run.app` origin.
+
+No service-account key exists anywhere in this pipeline: GitHub authenticates
+via Workload Identity Federation, and the deployed API verifies Firebase ID
+tokens using its runtime service account's `roles/firebaseauth.admin`. If you
+find yourself adding a JSON key to make something work, that is the signal to
+stop and fix the identity instead.

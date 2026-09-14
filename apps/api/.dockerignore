@@ -1,0 +1,37 @@
+# Keeps the build context small and, more importantly, keeps local
+# credentials and local state out of an image that gets pushed to a registry.
+# The Dockerfile COPYs explicit paths rather than ".", so this is defence in
+# depth rather than the only thing standing between a service-account key and
+# Artifact Registry — but see .gitignore's note on why that margin matters for
+# exactly this class of file.
+
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests and their fixtures are not part of the runtime image (the [dev] extra
+# that would run them isn't installed either — see the Dockerfile).
+tests/
+
+# Local-only: credentials, env files, emulator state and debug logs.
+.env
+.env.*
+!.env.example
+*serviceAccount*.json
+*service-account*.json
+*-adminsdk-*.json
+*.pem
+*.p12
+*-debug.log
+firebase-debug.log
+ui-debug.log
+firebase.json
+.firebase/
+
+# Dev tooling with no role in the image.
+Makefile
+README.md
