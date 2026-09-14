@@ -117,10 +117,22 @@ jobs:
       # drift. --wait makes the job's exit status gate everything below.
       - name: Run database migrations
         run: |
+          # --service-account is required, and must be the runtime account.
+          # Without it Cloud Run defaults the job to the compute default
+          # service account, and gh-deploy can only impersonate api-runtime
+          # (deliberately — see infra/bootstrap-gcp.sh), so the deploy is
+          # rejected before the job is even created. api-runtime is also the
+          # correct identity on the merits: it is the one holding
+          # cloudsql.client and secretmanager.secretAccessor, which is
+          # precisely what reading DATABASE_URL and connecting to Postgres
+          # needs. The service deploy below sets this too; they must match, or
+          # migrations and the code they migrate for run as different
+          # identities with different database grants.
           gcloud run jobs deploy "${SERVICE}-migrate" \
             --project "${PROJECT_ID}" \
             --region "${REGION}" \
             --image "${IMAGE}" \
+            --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-cloudsql-instances "${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
             --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
             --set-secrets "DATABASE_URL=database-url:latest" \
