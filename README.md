@@ -132,7 +132,7 @@ That same FK enforcement is why the Postgres run reports one skip:
 `test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
 `users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
 and Postgres physically refuses. The skip is deliberate and explained at the
-`skipif` in `tests/test_authz.py` — a Postgres run of 119 passed / 1 skipped
+`skipif` in `tests/test_authz.py` — a Postgres run of 124 passed / 1 skipped
 is the expected green result, not a masked failure.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
@@ -152,10 +152,9 @@ SDK is never loaded when unconfigured will instead initialize it for real.
   is untested — only the emulator path and the credential-less fail-closed
   path have been verified.
 - **Windows** is unverified; everything above was run on Linux.
-- **The deploy pipeline has never been run.** It is written
-  (`.github/workflows/deploy.yml`) but no deploy has happened, and the
-  Dockerfile has not yet been built even locally. Treat the first run as an
-  experiment, not a routine.
+- **The deploy pipeline is still being shaken out.** The image builds and
+  pushes, and the migration job runs, but no end-to-end deploy has yet
+  succeeded. Treat a deploy as an experiment, not a routine, until one has.
 
 ---
 
