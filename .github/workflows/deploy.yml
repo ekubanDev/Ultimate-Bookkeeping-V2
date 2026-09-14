@@ -209,12 +209,56 @@ jobs:
       # they do not have. Firebase's security comes from Auth tokens and
       # rules, not from hiding the project id. (The service-account key is the
       # actual secret, and it is not here — it never leaves Secret Manager.)
+      # Fail before building rather than after deploying. An unset `vars.*`
+      # resolves to an empty string with no warning, Vite inlines it as
+      # undefined, and src/auth/firebase.js's isFirebaseConfigured comes out
+      # false — producing a bundle that builds, deploys, and reports success
+      # while showing every user "Auth not configured" and offering no way to
+      # sign in. That shipped once. The app degrades gracefully here by
+      # design, which is right at runtime and exactly why CI cannot rely on
+      # noticing the failure downstream.
+      - name: Verify Firebase config is present before building
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+        run: |
+          missing=""
+          [ -n "${VITE_FIREBASE_API_KEY}" ]     || missing="${missing} VITE_FIREBASE_API_KEY"
+          [ -n "${VITE_FIREBASE_AUTH_DOMAIN}" ] || missing="${missing} VITE_FIREBASE_AUTH_DOMAIN"
+          [ -n "${VITE_FIREBASE_PROJECT_ID}" ]  || missing="${missing} VITE_FIREBASE_PROJECT_ID"
+          if [ -n "${missing}" ]; then
+            echo "Missing repository VARIABLES:${missing}" >&2
+            echo "" >&2
+            echo "Set them under Settings -> Secrets and variables -> Actions -> Variables" >&2
+            echo "(the Variables tab, not Secrets — they compile into the client bundle" >&2
+            echo "and are readable by anyone, so secrecy would be illusory)." >&2
+            echo "Without them the build succeeds but ships an app nobody can sign in to." >&2
+            exit 1
+          fi
+          echo "Firebase config present for project: ${VITE_FIREBASE_PROJECT_ID}"
+
       - name: Build outlet app
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
         run: npm run build:outlet
+
+      # Belt and braces on the ARTIFACT, not the environment: the check above
+      # proves the variables were set, this proves they reached the bundle.
+      # They are different failures — a vite config change, a mode mismatch,
+      # or an env-prefix change would pass the first and fail this one.
+      - name: Verify Firebase config reached the bundle
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+        run: |
+          if ! grep -rqF "${VITE_FIREBASE_PROJECT_ID}" --include="*.js" apps/outlet/dist/assets/; then
+            echo "Built bundle does not contain the Firebase project id — the app would" >&2
+            echo "render 'Auth not configured' for every user. Refusing to deploy." >&2
+            exit 1
+          fi
+          echo "Bundle contains the Firebase project id."
 
       - name: Verify emulator host did not leak into the bundle
         # A build that shipped VITE_FIREBASE_AUTH_EMULATOR_HOST would point
