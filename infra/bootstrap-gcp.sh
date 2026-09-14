@@ -238,6 +238,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Report against what actually exists, not against a fixed assumption about
+# where the operator is. A checklist that lists finished work as outstanding
+# trains people to skim it, and the steps below are ones you do not want
+# skimmed.
+SQL_INSTANCE="$(gcloud sql instances list --project "$PROJECT_ID" \
+  --format='value(name)' --filter="region:${REGION}" 2>/dev/null | head -1 || true)"
+if [[ -n "$SQL_INSTANCE" ]]; then
+  SQL_CONNECTION="$(gcloud sql instances describe "$SQL_INSTANCE" \
+    --project "$PROJECT_ID" --format='value(connectionName)' 2>/dev/null || true)"
+else
+  SQL_CONNECTION="${PROJECT_ID}:${REGION}:<instance-name>   # create it first, see below"
+fi
+
+if gcloud secrets versions list database-url --project "$PROJECT_ID" \
+     --format='value(name)' 2>/dev/null | grep -q .; then
+  SECRET_STATE="set (at least one version exists)"
+  STEP2_STATE="[ALREADY DONE]"
+else
+  SECRET_STATE="EMPTY — no version yet, see step 2"
+  STEP2_STATE="[TODO]"
+fi
+
+if [[ -n "$SQL_INSTANCE" ]]; then
+  STEP1_STATE="[ALREADY DONE — instance '${SQL_INSTANCE}' exists; kept below for reference]"
+else
+  STEP1_STATE="[TODO]"
+fi
+
 info "Done — values for GitHub"
 cat <<EOF
 
@@ -254,7 +282,9 @@ Settings -> Secrets and variables -> Actions
       ${RUNTIME_EMAIL}
 
     CLOUD_SQL_CONNECTION_NAME
-      ${PROJECT_ID}:${REGION}:<instance-name>     # after you create the instance
+      ${SQL_CONNECTION}
+
+  Secret Manager 'database-url': ${SECRET_STATE}
 
   VARIABLES (not secrets — these compile into the client bundle and are
   readable by anyone who opens devtools; see deploy.yml):
@@ -264,7 +294,8 @@ Settings -> Secrets and variables -> Actions
 
 STILL TO DO, in order:
 
-  1. Create the Cloud SQL instance. THIS STARTS BILLING (~\$10-25/month,
+  1. ${STEP1_STATE}
+     Create the Cloud SQL instance. THIS STARTS BILLING (~\$10-25/month,
      continuously, from creation — it does not scale to zero).
 
      Every flag below is load-bearing; an instance was once created here at
@@ -317,7 +348,8 @@ STILL TO DO, in order:
        gcloud sql users create ubk_app \\
          --project ${PROJECT_ID} --instance ubk-postgres --prompt-for-password
 
-  2. Add the DATABASE_URL secret version. Note the EMPTY host — the socket
+  2. ${STEP2_STATE}
+     Add the DATABASE_URL secret version. Note the EMPTY host — the socket
      path comes from CLOUD_SQL_CONNECTION_NAME via connect_args in
      apps/api/app/db.py, not from this URL:
 
