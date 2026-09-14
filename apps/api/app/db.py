@@ -43,12 +43,30 @@ DATABASE_URL = os.environ.get(
 # Cloud Run.
 CLOUD_SQL_CONNECTION_NAME = os.environ.get("CLOUD_SQL_CONNECTION_NAME")
 
-_connect_args: dict[str, str] = {}
-if CLOUD_SQL_CONNECTION_NAME:
-    # asyncpg treats a `host` that starts with "/" as a socket *directory*
-    # and appends "/.s.PGSQL.5432" itself — which is exactly where Cloud Run
-    # mounts the socket. Don't append the socket filename here.
-    _connect_args["host"] = f"/cloudsql/{CLOUD_SQL_CONNECTION_NAME}"
+
+def cloud_sql_connect_args() -> dict[str, str]:
+    """Extra asyncpg connect arguments for reaching Cloud SQL over its Unix
+    socket; empty everywhere else.
+
+    Exported rather than inlined because EVERY engine that talks to the
+    deployed database must apply it, and there is more than one: this module
+    builds the app's engine, and alembic/env.py builds a separate engine of
+    its own via `async_engine_from_config`. When only this module applied the
+    socket path, `alembic upgrade head` on Cloud Run fell back to asyncpg's
+    default of TCP 127.0.0.1:5432 and failed with a connection-refused error
+    that never mentions sockets or Cloud SQL — while the app itself connected
+    fine, so nothing else looked wrong. Import this instead of re-deriving it.
+
+    Note `host` is the socket DIRECTORY: asyncpg appends "/.s.PGSQL.5432"
+    itself, which is exactly where Cloud Run mounts the socket. Don't append
+    the socket filename here.
+    """
+    if not CLOUD_SQL_CONNECTION_NAME:
+        return {}
+    return {"host": f"/cloudsql/{CLOUD_SQL_CONNECTION_NAME}"}
+
+
+_connect_args: dict[str, str] = cloud_sql_connect_args()
 
 engine = create_async_engine(
     DATABASE_URL,

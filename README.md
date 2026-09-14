@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 120, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 119 + 1 skipped
+cd apps/api && pytest                       # 125, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 124 + 1 skipped
 
 npm run test:outlet          # 176
 npm run test:offline-queue   # 46
