@@ -152,6 +152,55 @@ SDK is never loaded when unconfigured will instead initialize it for real.
   is untested — only the emulator path and the credential-less fail-closed
   path have been verified.
 - **Windows** is unverified; everything above was run on Linux.
-- **Deployment** must run `alembic upgrade head` before serving traffic. The
-  managed-Postgres provider decision is still open — see the analysis in the
-  PR discussion.
+- **The deploy pipeline has never been run.** It is written
+  (`.github/workflows/deploy.yml`) but no deploy has happened, and the
+  Dockerfile has not yet been built even locally. Treat the first run as an
+  experiment, not a routine.
+
+---
+
+## Deployment
+
+Firebase Hosting serves the outlet PWA and rewrites `/api/**` to the API on
+Cloud Run, with Postgres on Cloud SQL. The rewrite is what keeps the app and
+the API **same-origin**, which the relative `API_BASE` depends on — see the
+note in `firebase.json`. Don't split them across origins.
+
+One-time setup (idempotent, safe to re-run):
+
+```bash
+./infra/bootstrap-gcp.sh --dry-run    # inspect first
+./infra/bootstrap-gcp.sh
+```
+
+That creates the Artifact Registry repo, two least-privilege service
+accounts, a Workload Identity pool/provider bound to this repo, and an empty
+`database-url` secret — then prints the GitHub secrets and variables to set
+and the remaining manual steps.
+
+It deliberately does **not** create the Cloud SQL instance: that is the only
+resource that bills continuously from the moment it exists (~$10–25/month on
+`db-f1-micro`, no scale-to-zero), so it stays an explicit command you run
+yourself. The script prints it.
+
+Deploys are **manual** (Actions → Deploy → type `deploy`). Automatic
+deploy-on-merge is deliberately not enabled until the pipeline has been
+watched to succeed a few times.
+
+Two properties worth preserving if you change any of this:
+
+- **`alembic upgrade head` runs as a Cloud Run Job, from the image just
+  built, and must succeed before the service deploys.** A migration failure
+  leaves the previous revision serving against the previous schema. Running
+  migrations from the container entrypoint instead would race every instance
+  Cloud Run starts against every other one.
+- **The Cloud Run service is `--no-allow-unauthenticated`.** Hosting invokes
+  it as an authenticated caller, so the only route in is through Hosting.
+  Making it public would give clients a second, cross-origin path to the API
+  on its `*.run.app` origin.
+
+No service-account key exists anywhere in this pipeline: GitHub authenticates
+via Workload Identity Federation, and the deployed API verifies Firebase ID
+tokens using its runtime service account's `roles/firebaseauth.admin`. If you
+find yourself adding a JSON key to make something work, that is the signal to
+stop and fix the identity instead.

@@ -176,13 +176,17 @@ jobs:
             exit 1
           fi
 
+      # Deployed with firebase-tools rather than FirebaseExtended's action
+      # because that action takes a service-account JSON key as a secret —
+      # which would reintroduce exactly the long-lived stored credential
+      # Workload Identity Federation exists to avoid, for the one step that
+      # happens to have a convenient action. firebase-tools honours the
+      # GOOGLE_APPLICATION_CREDENTIALS that google-github-actions/auth
+      # already exported above, so this step is keyless like the rest. The
+      # deploy service account needs roles/firebasehosting.admin (granted by
+      # infra/bootstrap-gcp.sh).
       - name: Deploy Firebase Hosting
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          projectId: ultimate-bookkeeping-v2
-          channelId: live
+        run: npx --yes firebase-tools@13 deploy --only hosting --project "${PROJECT_ID}" --non-interactive
 
       - name: Summary
         run: |
