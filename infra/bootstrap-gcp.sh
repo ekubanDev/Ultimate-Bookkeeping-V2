@@ -271,26 +271,39 @@ cat <<EOF
 
 Settings -> Secrets and variables -> Actions
 
-  SECRETS (Repository secrets):
-    GCP_WORKLOAD_IDENTITY_PROVIDER
-      projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/providers/${PROVIDER}
+Each entry below is TWO separate fields in the GitHub UI. Paste the Name
+into the name box and the Value into the value box — pasting a whole line
+gets you "Variable names can only contain alphanumeric characters...".
 
-    GCP_DEPLOY_SERVICE_ACCOUNT
-      ${DEPLOY_EMAIL}
+  SECRETS — the "Secrets" TAB (New repository secret):
 
-    RUNTIME_SERVICE_ACCOUNT
-      ${RUNTIME_EMAIL}
+    Name:   GCP_WORKLOAD_IDENTITY_PROVIDER
+    Value:  projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/providers/${PROVIDER}
 
-    CLOUD_SQL_CONNECTION_NAME
-      ${SQL_CONNECTION}
+    Name:   GCP_DEPLOY_SERVICE_ACCOUNT
+    Value:  ${DEPLOY_EMAIL}
+
+    Name:   RUNTIME_SERVICE_ACCOUNT
+    Value:  ${RUNTIME_EMAIL}
+
+    Name:   CLOUD_SQL_CONNECTION_NAME
+    Value:  ${SQL_CONNECTION}
 
   Secret Manager 'database-url': ${SECRET_STATE}
 
-  VARIABLES (not secrets — these compile into the client bundle and are
-  readable by anyone who opens devtools; see deploy.yml):
-    VITE_FIREBASE_API_KEY        AIzaSyDtdvXWHuqBc0W0NlBbmuG6DJewdmlmHNM
-    VITE_FIREBASE_AUTH_DOMAIN    ${PROJECT_ID}.firebaseapp.com
-    VITE_FIREBASE_PROJECT_ID     ${PROJECT_ID}
+  VARIABLES — the "Variables" TAB, not "Secrets". These compile into the
+  client bundle and are readable by anyone who opens devtools, so putting
+  them in Secrets would hide them from you and from nobody else (see
+  deploy.yml, which reads them as \${{ vars.* }}).
+
+    Name:   VITE_FIREBASE_API_KEY
+    Value:  <the apiKey from your Firebase web app config>
+
+    Name:   VITE_FIREBASE_AUTH_DOMAIN
+    Value:  ${PROJECT_ID}.firebaseapp.com
+
+    Name:   VITE_FIREBASE_PROJECT_ID
+    Value:  ${PROJECT_ID}
 
 STILL TO DO, in order:
 
