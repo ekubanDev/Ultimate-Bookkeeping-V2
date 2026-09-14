@@ -81,17 +81,36 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      # Built on the runner with Docker, NOT `gcloud builds submit`.
+      #
+      # Cloud Build runs each build AS a service account, and the submitter
+      # needs iam.serviceAccountUser on it. By default that account is
+      # <project-number>-compute@developer.gserviceaccount.com, which carries
+      # roles/editor — so wiring this the obvious way would have granted a
+      # step that only needs to push one image the ability to edit the whole
+      # project, and would have required gh-deploy to be able to impersonate
+      # an editor-privileged identity. Using a dedicated build service account
+      # avoids that but then needs explicit --service-account plus a logs
+      # bucket or logging-mode flag, because Cloud Build refuses the default
+      # bucket behaviour for custom service accounts.
+      #
+      # Building here needs none of it: gh-deploy already has
+      # artifactregistry.writer, which is the only permission a push requires.
+      # No build service account, no staging bucket, no logging config — and
+      # the image is produced by the same docker build that runs locally.
+      #
       # Tag by commit SHA, never `latest`: the SHA is what makes a rollback
       # ("deploy the previous tag") a real operation rather than a guess about
       # which build `latest` currently points at.
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
       - name: Build and push image
         run: |
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${GITHUB_SHA}"
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
-          gcloud builds submit apps/api \
-            --project "${PROJECT_ID}" \
-            --region "${REGION}" \
-            --tag "${IMAGE}"
+          docker build -t "${IMAGE}" apps/api
+          docker push "${IMAGE}"
 
       # Migrations run from the image just built, so the schema change and the
       # code expecting it are the same artifact — not two checkouts that could
