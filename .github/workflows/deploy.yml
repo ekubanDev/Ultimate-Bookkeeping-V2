@@ -201,11 +201,37 @@ jobs:
         # A build that shipped VITE_FIREBASE_AUTH_EMULATOR_HOST would point
         # real cashiers' sign-in at a local emulator that does not exist.
         # Cheap assertion on the actual artifact rather than trust in the env.
+        #
+        # --include="*.js": EXECUTABLE bundle only. vite builds with
+        # sourcemap: true, and a .map embeds the original sources of every
+        # dependency — the Firebase SDK's own sourcemap contains
+        # connectAuthEmulator's JSDoc and its example
+        # 'http://127.0.0.1:9099'. The previous version of this check grepped
+        # the whole directory for a bare "9099" and so failed a perfectly
+        # clean build on a library's documentation comment. A guard that
+        # cries wolf gets deleted by whoever is on call at 2am, so its
+        # precision is the point, not a nicety.
+        #
+        # Matching a host:port rather than the bare port for the same reason:
+        # "9099" is four digits and appears readily in minified output by
+        # coincidence.
         run: |
-          if grep -rq "VITE_FIREBASE_AUTH_EMULATOR_HOST\|9099" apps/outlet/dist/assets/ 2>/dev/null; then
-            echo "Emulator host referenced in production bundle — refusing to deploy." >&2
+          assets="apps/outlet/dist/assets"
+          # Assert the thing we are scanning exists. Without this the grep
+          # below fails on a missing directory, the `if` reads false, and the
+          # step passes green having checked nothing — worse than no guard.
+          if [ ! -d "$assets" ] || ! ls "$assets"/*.js >/dev/null 2>&1; then
+            echo "No built JS found in ${assets} — cannot verify the bundle." >&2
             exit 1
           fi
+          if grep -rlE "VITE_FIREBASE_AUTH_EMULATOR_HOST|(127\.0\.0\.1|localhost|0\.0\.0\.0):[0-9]+" \
+               --include="*.js" "$assets" 2>/dev/null | grep -q .; then
+            echo "Emulator/loopback host referenced in production bundle — refusing to deploy." >&2
+            grep -rlE "VITE_FIREBASE_AUTH_EMULATOR_HOST|(127\.0\.0\.1|localhost|0\.0\.0\.0):[0-9]+" \
+              --include="*.js" "$assets" >&2
+            exit 1
+          fi
+          echo "Bundle clean: no emulator or loopback host in $(ls "$assets"/*.js | wc -l) JS files."
 
       # Deployed with firebase-tools rather than FirebaseExtended's action
       # because that action takes a service-account JSON key as a secret —
