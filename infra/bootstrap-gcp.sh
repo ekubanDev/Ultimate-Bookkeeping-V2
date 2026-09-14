@@ -265,16 +265,51 @@ Settings -> Secrets and variables -> Actions
 STILL TO DO, in order:
 
   1. Create the Cloud SQL instance. THIS STARTS BILLING (~\$10-25/month,
-     continuously, from creation — it does not scale to zero):
+     continuously, from creation — it does not scale to zero).
+
+     Every flag below is load-bearing; an instance was once created here at
+     db-perf-optimized-N-8 / us-east1 / POSTGRES_18 / backups off, which is
+     30-50x the needed size, in a region that mismatches deploy.yml, on a
+     major version CI never tests, with no backups on a financial database.
+     Defaults and console clicks do not produce this configuration:
+
+       --database-version POSTGRES_16  matches CI's postgres:16 service
+                                       container. Deploy what you test.
+       --edition ENTERPRISE            REQUIRED. New instances here default
+                                       to ENTERPRISE_PLUS, whose only machine
+                                       types are db-perf-optimized-N-* (8
+                                       vCPU up, hundreds of dollars a month).
+                                       Shared-core tiers do not exist in that
+                                       edition, so without this flag a
+                                       right-sized instance is uncreatable.
+       --tier db-f1-micro              sized for a pilot. Revisit under real
+                                       load, deliberately.
+       --region ${REGION}          MUST match REGION in deploy.yml and the
+                                       rewrite in firebase.json.
+       --backup-start-time             enables backups at all. This is the
+                                       financial record of a business.
+       --deletion-protection           one flag between you and \`sql
+                                       instances delete\`.
 
        gcloud sql instances create ubk-postgres \\
          --project ${PROJECT_ID} \\
          --database-version POSTGRES_16 \\
+         --edition ENTERPRISE \\
          --tier db-f1-micro \\
          --region ${REGION} \\
          --storage-size 10GB \\
+         --storage-type SSD \\
          --storage-auto-increase \\
-         --backup-start-time 02:00
+         --backup-start-time 02:00 \\
+         --retained-backups-count 7 \\
+         --availability-type zonal \\
+         --deletion-protection
+
+       # Close the plaintext path over the public IP. No authorized networks
+       # are added, so the IAM-authenticated Cloud SQL Auth proxy — which is
+       # how Cloud Run connects — is the only route in.
+       gcloud sql instances patch ubk-postgres \\
+         --project ${PROJECT_ID} --ssl-mode ENCRYPTED_ONLY
 
        gcloud sql databases create ultimate_bookkeeping \\
          --project ${PROJECT_ID} --instance ubk-postgres
