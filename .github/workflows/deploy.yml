@@ -162,13 +162,32 @@ jobs:
             --cpu 1 \
             --memory 512Mi \
             --timeout 60s \
-            --no-allow-unauthenticated
-          # --no-allow-unauthenticated: the service is NOT public. Firebase
-          # Hosting's rewrite invokes it as an authenticated caller, so the
-          # only route in is through Hosting — which is what keeps the app
-          # same-origin. Making this public would let a client reach the API
-          # directly on its *.run.app origin, reintroducing the cross-origin
-          # path packages/api-client/_base.js exists to prevent.
+            --allow-unauthenticated
+          # --allow-unauthenticated is REQUIRED, and does not mean the API is
+          # unprotected.
+          #
+          # It refers to Cloud Run's PLATFORM-level IAM check, not to the
+          # application. Firebase Hosting does not attach an identity token
+          # when it rewrites to Cloud Run, so a service deployed
+          # --no-allow-unauthenticated rejects Hosting's request with Google's
+          # own HTML 403 and the request never reaches the app at all. That
+          # was shipped once and is what a working-but-entirely-unreachable
+          # API looks like: the site loads, every /api/** call returns a 403
+          # HTML page, and nothing in the application logs shows anything,
+          # because nothing arrived.
+          #
+          # What actually guards the API is Firebase ID-token verification on
+          # every route (app/auth.py), plus rate limiting (app/rate_limit.py).
+          # Verified against the deployed service: /api/v1/me and
+          # POST /api/v1/sales both return 401 UNAUTHENTICATED with no token
+          # and with an invalid one.
+          #
+          # This does mean the *.run.app URL is reachable from the internet.
+          # That is not a new exposure of user data: every request there faces
+          # the same token check. It is also not a cross-origin token risk —
+          # packages/api-client/_base.js hardcodes a RELATIVE API_BASE, so the
+          # browser only ever sends bearer tokens to the Hosting origin, no
+          # matter what else happens to be reachable.
           #
           # FIREBASE_AUTH_EMULATOR_HOST is deliberately absent and must stay
           # absent: app/auth.py accepts emulator-signed tokens when it is set,

@@ -193,10 +193,16 @@ Two properties worth preserving if you change any of this:
   leaves the previous revision serving against the previous schema. Running
   migrations from the container entrypoint instead would race every instance
   Cloud Run starts against every other one.
-- **The Cloud Run service is `--no-allow-unauthenticated`.** Hosting invokes
-  it as an authenticated caller, so the only route in is through Hosting.
-  Making it public would give clients a second, cross-origin path to the API
-  on its `*.run.app` origin.
+- **The Cloud Run service must be `--allow-unauthenticated`.** That is a
+  platform-level IAM setting, not an application one. Firebase Hosting does
+  not attach an identity token when it rewrites to Cloud Run, so a private
+  service answers Hosting with Google's own HTML 403 and the request never
+  reaches the app — the site loads, every `/api/**` call 403s, and nothing
+  appears in the application logs because nothing arrived. What guards the
+  API is Firebase ID-token verification on every route plus rate limiting;
+  platform IAM was never doing that work. The `*.run.app` URL being
+  reachable is not a cross-origin token risk either: `API_BASE` is relative,
+  so the browser only ever sends tokens to the Hosting origin.
 
 No service-account key exists anywhere in this pipeline: GitHub authenticates
 via Workload Identity Federation, and the deployed API verifies Firebase ID
