@@ -206,3 +206,42 @@ describe("previewTotalCents — pure preview math (integer cents, half-up roundi
     ).toBe(150);
   });
 });
+
+describe("CheckoutModal — which status blocks confirm", () => {
+  // The distinction this pins is the whole bug: 'submitting' means enqueue()
+  // has not resolved yet and a second tap would mint a second client_id.
+  // 'queued' means it HAS resolved — the sale is durably persisted and will
+  // sync when the network returns. Offline, 'queued' is the only outcome a
+  // sale can reach, so treating it as "still working" left the confirm
+  // button greyed out and labelled "Recording..." forever, and a cashier
+  // could record exactly one sale per offline session.
+  //
+  // Asserted here, at the modal, rather than only through PosScreen: the
+  // screen also resets status when opening checkout, which masks this at
+  // that level. These assertions fail against the old behaviour regardless.
+  it("does NOT block confirm on 'queued' — that is a durably-persisted sale, not work in progress", () => {
+    const { onConfirm } = renderModal({ status: "queued" });
+
+    const button = screen.getByRole("button", { name: /confirm sale/i });
+    expect(button.disabled).toBe(false);
+
+    fireEvent.click(button);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks confirm while 'submitting' and labels it 'Recording...'", () => {
+    const { onConfirm } = renderModal({ status: "submitting" });
+
+    const button = screen.getByRole("button", { name: /recording/i });
+    expect(button.disabled).toBe(true);
+
+    fireEvent.click(button);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("labels the button 'Confirm sale' once a sale is queued, not 'Recording...'", () => {
+    renderModal({ status: "queued" });
+    expect(screen.queryByRole("button", { name: /recording/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /confirm sale/i })).toBeTruthy();
+  });
+});

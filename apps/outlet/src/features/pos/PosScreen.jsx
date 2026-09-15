@@ -22,7 +22,7 @@ export default function PosScreen() {
   const { profile } = useAuth();
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
   const cart = useCart();
-  const { submitSale, status } = useSubmitSale();
+  const { submitSale, status, reset: resetSubmit } = useSubmitSale();
   const { products, loading, error } = useProducts(profile?.outlet_id);
 
   // Admin accounts have no outlet_id — this app is for outlet managers only
@@ -106,7 +106,13 @@ export default function PosScreen() {
       />
       <Button
         disabled={cart.lineItems.length === 0}
-        onClick={() => setCheckoutOpen(true)}
+        onClick={() => {
+          // Clear any terminal state from the PREVIOUS sale before opening.
+          // Without this a stale 'failed' banner would greet the cashier at
+          // the start of an unrelated sale.
+          resetSubmit();
+          setCheckoutOpen(true);
+        }}
       >
         Checkout
       </Button>

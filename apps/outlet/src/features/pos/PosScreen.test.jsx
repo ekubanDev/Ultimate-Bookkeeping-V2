@@ -255,3 +255,69 @@ describe("PosScreen — product catalog sourcing (useProducts)", () => {
     expect(screen.queryByText(/no products yet/i)).toBeNull();
   });
 });
+
+describe("PosScreen — consecutive sales while offline", () => {
+  // Regression cover for a bug found on the live deployment: offline, a
+  // cashier could record exactly ONE sale. The second checkout opened with
+  // the confirm button greyed out and labelled "Recording...", forever.
+  //
+  // Cause: enqueue() resolves with state 'queued' when there is no network
+  // (it can never reach 'synced'), useSubmitSale stored that as its status,
+  // and CheckoutModal's canConfirm gated on `status !== 'queued'`. So the
+  // terminal SUCCESS state was being read as "still in flight".
+  //
+  // It hid online because dispatch usually completes fast enough that
+  // enqueue() returns 'synced' — the two states were distinguishable only by
+  // timing, which is exactly the condition that disappears offline. PosScreen
+  // already treated queued as success (it clears the cart and closes the
+  // modal on it); CheckoutModal disagreed.
+  //
+  // enqueueMock resolves { state: "queued" } by default (see beforeEach),
+  // which IS the offline case, so this needs no extra setup.
+  it("allows a second sale after the first one is queued offline", async () => {
+    render(<PosScreen />);
+
+    // --- first sale ---
+    fireEvent.click(screen.getByRole("button", { name: /Milo 400g/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm sale/i }));
+
+    await screen.findByRole("button", { name: /^checkout$/i });
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
+
+    // --- second sale: the button must be usable again ---
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+
+    const confirm = await screen.findByRole("button", { name: /confirm sale/i });
+    expect(confirm.disabled).toBe(false);
+
+    fireEvent.click(confirm);
+    expect(enqueueMock).toHaveBeenCalledTimes(2);
+
+    // Each sale carries its own client_id — the idempotency contract would be
+    // broken if a reused intent were resubmitted under the same key.
+    const ids = enqueueMock.mock.calls.map(([intent]) => intent.client_id);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("shows 'Recording...' only while enqueue is actually in flight", async () => {
+    let resolveEnqueue;
+    enqueueMock.mockReset();
+    enqueueMock.mockImplementation(
+      () => new Promise((resolve) => { resolveEnqueue = resolve; })
+    );
+
+    render(<PosScreen />);
+    fireEvent.click(screen.getByRole("button", { name: /Milo 400g/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^checkout$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm sale/i }));
+
+    // In flight: label changes and the button is blocked (double-tap guard).
+    const recording = await screen.findByRole("button", { name: /recording/i });
+    expect(recording.disabled).toBe(true);
+
+    resolveEnqueue({ state: "queued", client_id: "entry-1" });
+    await screen.findByRole("button", { name: /^checkout$/i });
+  });
+});
