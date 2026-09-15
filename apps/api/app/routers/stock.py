@@ -70,10 +70,34 @@ async def _fetch_movement_by_client_id(db: AsyncSession, client_id: str) -> Stoc
     return result.scalar_one_or_none()
 
 
-async def _fetch_level(db: AsyncSession, product_id: uuid.UUID, outlet_id: uuid.UUID) -> StockLevel | None:
-    result = await db.execute(
-        select(StockLevel).where(StockLevel.product_id == product_id, StockLevel.outlet_id == outlet_id)
+async def _fetch_level(
+    db: AsyncSession,
+    product_id: uuid.UUID,
+    outlet_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> StockLevel | None:
+    """Read a stock_levels row; optionally lock it for the transaction.
+
+    `for_update=True` ONLY on the adjustment write path below. Without it,
+    read-compute-write on this row is a lost update: a plain SELECT takes no
+    lock under READ COMMITTED, and the write is an absolute value
+    (`level.quantity = new_quantity`), so two concurrent adjustments both
+    read the same starting quantity and the second silently overwrites the
+    first — including past the `new_quantity < 0` guard. Reproduced in
+    tests/test_stock_concurrency.py; same defect as the one in
+    routers/sales.py, see the longer note there.
+
+    Deliberately opt-in rather than always-on: the replay, winner and
+    read-only call sites do not need to serialize, and taking write locks on
+    a GET would turn a cheap read into a contention point during a rush.
+    """
+    stmt = select(StockLevel).where(
+        StockLevel.product_id == product_id, StockLevel.outlet_id == outlet_id
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
@@ -115,7 +139,10 @@ async def create_stock_adjustment(
         )
 
     # --- 3. Compute resulting quantity, reject negative-going deltas -------
-    level = await _fetch_level(db, payload.product_id, outlet_id)
+    # for_update: the lock must be taken BEFORE reading current_quantity, so
+    # the check below and the write at the end of this transaction see the
+    # same value. See _fetch_level's docstring.
+    level = await _fetch_level(db, payload.product_id, outlet_id, for_update=True)
     current_quantity = level.quantity if level is not None else 0
     new_quantity = current_quantity + payload.delta
     if new_quantity < 0:

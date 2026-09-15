@@ -119,8 +119,36 @@ async def create_sale(
         )
 
     # --- 3. Verify stock covers every line item -----------------------------
+    # with_for_update(): take a row lock BEFORE the availability check, and
+    # hold it until this transaction commits.
+    #
+    # Without it this is a classic lost update, and it is not theoretical —
+    # see tests/test_stock_concurrency.py, which reproduces it. A plain
+    # SELECT takes no lock under Postgres READ COMMITTED, and the write below
+    # is an ABSOLUTE value (`level.quantity -= n` makes SQLAlchemy emit
+    # `SET quantity = <computed>`, not `SET quantity = quantity - n`). So two
+    # concurrent sales of the same SKU both read the same starting quantity,
+    # both pass the `available < item.quantity` check, and the second commit
+    # overwrites the first. No IntegrityError, no serialization failure —
+    # stock_levels just stops matching the stock_movements ledger, and every
+    # later availability check reads from the corrupted value.
+    #
+    # Normal operating conditions reach this: two cashiers on two devices, or
+    # one device flushing a batch of queued offline sales after an outage.
+    #
+    # order_by(product_id) is part of the fix, not tidiness: a multi-line sale
+    # locks several rows, and two sales touching the same products in
+    # different orders would deadlock. A consistent global ordering means one
+    # waits instead.
+    #
+    # SQLite ignores FOR UPDATE (SQLAlchemy's dialect renders nothing), so the
+    # fast SQLite test run is unaffected — which is exactly why the
+    # concurrency tests are Postgres-only.
     stock_result = await db.execute(
-        select(StockLevel).where(StockLevel.outlet_id == outlet_id, StockLevel.product_id.in_(product_ids))
+        select(StockLevel)
+        .where(StockLevel.outlet_id == outlet_id, StockLevel.product_id.in_(product_ids))
+        .order_by(StockLevel.product_id)
+        .with_for_update()
     )
     stock_by_product = {s.product_id: s for s in stock_result.scalars().all()}
 

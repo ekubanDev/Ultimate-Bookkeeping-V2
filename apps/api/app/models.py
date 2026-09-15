@@ -82,7 +82,21 @@ class Product(Base):
 
 class StockLevel(Base):
     __tablename__ = "stock_levels"
-    __table_args__ = (UniqueConstraint("product_id", "outlet_id", name="uq_stock_levels_product_outlet"),)
+    __table_args__ = (
+        UniqueConstraint("product_id", "outlet_id", name="uq_stock_levels_product_outlet"),
+        # Backstop, not the primary control. Both write paths
+        # (routers/sales.py, routers/stock.py) check availability before
+        # writing and now take a row lock so that check cannot be raced —
+        # this constraint is what catches it if a future code path forgets
+        # the lock, or reintroduces an absolute-value write without one.
+        #
+        # sales.total_amount and expenses.amount already had non-negative
+        # constraints; stock_levels.quantity did not, which is why a lost
+        # update could silently drive stock negative with nothing objecting.
+        # Code review found the gap (Efua and Adjoa independently) after the
+        # race itself was reproduced in tests/test_stock_concurrency.py.
+        CheckConstraint("quantity >= 0", name="ck_stock_levels_quantity_nonneg"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     product_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("products.id"), nullable=False)
