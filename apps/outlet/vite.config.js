@@ -126,6 +126,29 @@ export default defineConfig(({ mode }) => {
           // second time.
           globPatterns: ["**/*.{js,css,html,svg,png,ico}"],
 
+          // clientsClaim: take control of the page that INSTALLED this
+          // worker, instead of waiting for the next load.
+          //
+          // Without it the first session is never offline-capable, and the
+          // symptom is specific rather than general: PosScreen is a static
+          // import and lives in the main bundle, so it keeps working, while
+          // Stock/Expenses/Sync are React.lazy() and each need their own
+          // chunk fetched at navigation time. Those chunks are precached
+          // (see the manifest), but an uncontrolled page bypasses the
+          // service worker entirely and goes to the network — so navigation
+          // hangs on the Suspense fallback with no error anywhere. Install,
+          // go offline, and the app looks fine until you try to leave the
+          // POS screen.
+          //
+          // Safe alongside registerType: 'prompt'. The danger that setting
+          // guards against is skipWaiting — swapping JS out from under an
+          // open cart mid-sale — and that remains gated on the cashier
+          // accepting the update prompt. clientsClaim only takes effect when
+          // a worker ACTIVATES; an updated worker still waits. On a first
+          // install there is no previous version to swap, so claiming is
+          // exactly the desired behaviour.
+          clientsClaim: true,
+
           // SPA fallback: a direct/deep-link navigation (e.g. reloading on
           // /stock, or the OS relaunching the app on its last route) while
           // offline must still resolve to the precached shell so
