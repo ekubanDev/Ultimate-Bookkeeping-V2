@@ -27,26 +27,47 @@ export interface SaleLineItemRequest {
   submitted_unit_price: string;
 }
 
-/** Request body for POST /api/v1/sales */
+/**
+ * Request body for POST /api/v1/sales.
+ *
+ * OPTIONALITY HERE MIRRORS THE SERVER, not what a well-behaved client sends.
+ * Five fields below were declared required here while
+ * `SaleCreateRequest` in apps/api/app/schemas.py accepted them as optional
+ * with defaults — hand-maintained twins that had already drifted, found in
+ * code review. They now match, and apps/api/tests/test_shared_types_drift.py
+ * fails CI if they diverge again.
+ *
+ * `?` means "the server will accept a body without this", NOT "leave it
+ * out". useSubmitSale.js always sends all of them, which is why the drift
+ * never showed up at runtime.
+ *
+ * OPEN PRODUCT QUESTION (payment_method): the API currently records a sale
+ * with `payment_method = NULL` if the field is omitted. For a bookkeeping
+ * system that is arguably wrong — a sale in the books with no record of how
+ * it was paid. Tightening it is a one-line change in schemas.py plus
+ * dropping the `?` here; the drift test keeps the two in step either way.
+ * Left as-is pending a decision rather than changed unilaterally.
+ */
 export interface SaleRequest {
   /** UUID generated on-device, once, at intent creation. Idempotency key. */
   client_id: string;
   outlet_id: string;
   line_items: SaleLineItemRequest[];
-  payment_method: PaymentMethod;
-  /** Cart-level discount kind — percentage or a fixed GHS amount. */
-  discount_type: DiscountType;
+  /** Optional server-side — see the note above; clients should always send it. */
+  payment_method?: PaymentMethod;
+  /** Cart-level discount kind — percentage or a fixed GHS amount. Server default: "fixed". */
+  discount_type?: DiscountType;
   /**
    * NUMERIC(12,2)-shaped string whose *meaning* depends on `discount_type`:
    * "0.00"–"100.00" when `discount_type` is "percentage" (not a money
    * amount — the decimal type is reused for precision only), or a GHS money
-   * amount when `discount_type` is "fixed".
+   * amount when `discount_type` is "fixed". Server default: "0.00".
    */
-  discount_value: string;
-  /** NUMERIC(12,2) as a string */
-  tax_amount: string;
+  discount_value?: string;
+  /** NUMERIC(12,2) as a string. Server default: "0.00". */
+  tax_amount?: string;
   /** Client-side timestamp, audit-only — never used for ordering. ISO 8601. */
-  device_recorded_at: string;
+  device_recorded_at?: string;
 }
 
 /** 201 response body for POST /api/v1/sales */
