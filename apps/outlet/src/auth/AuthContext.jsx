@@ -193,13 +193,22 @@ export function AuthProvider({ children }) {
   // SDK handles token refresh internally, so `() => user.getIdToken()`
   // always returns a current token, including for offline-queue's
   // replayed requests.
-  useEffect(() => {
-    if (firebaseUser) {
-      setTokenProvider(() => firebaseUser.getIdToken());
-    } else {
-      setTokenProvider(() => Promise.resolve(null));
-    }
-  }, [firebaseUser]);
+  // Registration lives in ONE place: the onAuthStateChanged callback below.
+  // It used to also happen here, in an effect keyed on [firebaseUser], and
+  // that effect is deliberately gone rather than kept as a safety net.
+  //
+  // The effect ran a render too late, which is what caused the first /me
+  // after sign-in to go out with no Authorization header at all (401
+  // UNAUTHENTICATED). The synchronous call in the callback fixed that — but
+  // leaving the effect in place afterwards left two call sites that had to
+  // stay behaviourally identical forever, with nothing enforcing it. That is
+  // the same "correct here, silently different there" shape as the bug being
+  // fixed, just moved one level up. `firebaseUser` is only ever set from that
+  // callback, so the effect could derive nothing the callback didn't already
+  // know.
+  //
+  // @ub/api-client defaults its provider to `async () => null`, so the window
+  // before the SDK resolves is already safe without a registration here.
 
   // Binds the acting user's id into @ub/offline-queue for its
   // identity-mismatch check (Nana's security-review finding) — this is
