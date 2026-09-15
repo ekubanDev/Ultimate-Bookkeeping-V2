@@ -25,7 +25,7 @@ from alembic import context
 # fully populated (SQLAlchemy models only register themselves on their
 # metadata when the module defining them has been imported) before it's
 # handed to Alembic as target_metadata for autogenerate.
-from app.db import Base
+from app.db import Base, cloud_sql_connect_args
 import app.models  # noqa: F401  (import side effect: registers tables on Base.metadata)
 
 # this is the Alembic Config object, which provides
@@ -99,10 +99,17 @@ async def run_async_migrations() -> None:
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = _get_database_url()
 
+    # connect_args is NOT inherited from app/db.py's engine — this is a
+    # separate engine, and on Cloud Run the difference is fatal: without the
+    # socket path asyncpg falls back to TCP 127.0.0.1:5432 and fails with a
+    # connection-refused error that mentions neither sockets nor Cloud SQL.
+    # Empty dict (so: unchanged behaviour) anywhere CLOUD_SQL_CONNECTION_NAME
+    # is unset, which is local dev and both CI database jobs.
     connectable = async_engine_from_config(
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=cloud_sql_connect_args(),
     )
 
     async with connectable.connect() as connection:

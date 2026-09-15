@@ -141,12 +141,21 @@ else
   made "$DEPLOY_EMAIL"
 fi
 
+# No roles/cloudbuild.builds.editor and no roles/storage.admin: the image is
+# built with docker on the GitHub runner and pushed straight to Artifact
+# Registry (see .github/workflows/deploy.yml), so Cloud Build and its staging
+# bucket are not in the path at all. artifactregistry.writer is the only
+# permission a push needs.
+#
+# If you ever move the build back to `gcloud builds submit`, note that it
+# needs more than cloudbuild.builds.editor: builds run AS a service account,
+# and by default that is the compute default account, which holds
+# roles/editor — so the deployer would need iam.serviceAccountUser on an
+# editor-privileged identity just to push an image.
 for role in \
   roles/run.admin \
-  roles/cloudbuild.builds.editor \
   roles/artifactregistry.writer \
   roles/firebasehosting.admin \
-  roles/storage.admin \
   roles/logging.viewer
 do
   run gcloud projects add-iam-policy-binding "$PROJECT_ID" \

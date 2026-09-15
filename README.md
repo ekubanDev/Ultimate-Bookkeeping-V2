@@ -115,10 +115,10 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 120, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 119 + 1 skipped
+cd apps/api && pytest                       # 125, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 124 + 1 skipped
 
-npm run test:outlet          # 176
+npm run test:outlet          # 178
 npm run test:offline-queue   # 46
 npm run test:api-client      # 10
 npm run build:outlet
@@ -132,11 +132,11 @@ That same FK enforcement is why the Postgres run reports one skip:
 `test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
 `users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
 and Postgres physically refuses. The skip is deliberate and explained at the
-`skipif` in `tests/test_authz.py` — a Postgres run of 119 passed / 1 skipped
+`skipif` in `tests/test_authz.py` — a Postgres run of 124 passed / 1 skipped
 is the expected green result, not a masked failure.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
-forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 176
+forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 178
 whether or not you followed the `cp .env.example .env.local` step above.
 Don't remove that override — without it, the tests asserting the Firebase
 SDK is never loaded when unconfigured will instead initialize it for real.
@@ -152,10 +152,9 @@ SDK is never loaded when unconfigured will instead initialize it for real.
   is untested — only the emulator path and the credential-less fail-closed
   path have been verified.
 - **Windows** is unverified; everything above was run on Linux.
-- **The deploy pipeline has never been run.** It is written
-  (`.github/workflows/deploy.yml`) but no deploy has happened, and the
-  Dockerfile has not yet been built even locally. Treat the first run as an
-  experiment, not a routine.
+- **The deploy pipeline is still being shaken out.** The image builds and
+  pushes, and the migration job runs, but no end-to-end deploy has yet
+  succeeded. Treat a deploy as an experiment, not a routine, until one has.
 
 ---
 
@@ -194,10 +193,16 @@ Two properties worth preserving if you change any of this:
   leaves the previous revision serving against the previous schema. Running
   migrations from the container entrypoint instead would race every instance
   Cloud Run starts against every other one.
-- **The Cloud Run service is `--no-allow-unauthenticated`.** Hosting invokes
-  it as an authenticated caller, so the only route in is through Hosting.
-  Making it public would give clients a second, cross-origin path to the API
-  on its `*.run.app` origin.
+- **The Cloud Run service must be `--allow-unauthenticated`.** That is a
+  platform-level IAM setting, not an application one. Firebase Hosting does
+  not attach an identity token when it rewrites to Cloud Run, so a private
+  service answers Hosting with Google's own HTML 403 and the request never
+  reaches the app — the site loads, every `/api/**` call 403s, and nothing
+  appears in the application logs because nothing arrived. What guards the
+  API is Firebase ID-token verification on every route plus rate limiting;
+  platform IAM was never doing that work. The `*.run.app` URL being
+  reachable is not a cross-origin token risk either: `API_BASE` is relative,
+  so the browser only ever sends tokens to the Hosting origin.
 
 No service-account key exists anywhere in this pipeline: GitHub authenticates
 via Workload Identity Federation, and the deployed API verifies Firebase ID

@@ -81,27 +81,58 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      # Built on the runner with Docker, NOT `gcloud builds submit`.
+      #
+      # Cloud Build runs each build AS a service account, and the submitter
+      # needs iam.serviceAccountUser on it. By default that account is
+      # <project-number>-compute@developer.gserviceaccount.com, which carries
+      # roles/editor — so wiring this the obvious way would have granted a
+      # step that only needs to push one image the ability to edit the whole
+      # project, and would have required gh-deploy to be able to impersonate
+      # an editor-privileged identity. Using a dedicated build service account
+      # avoids that but then needs explicit --service-account plus a logs
+      # bucket or logging-mode flag, because Cloud Build refuses the default
+      # bucket behaviour for custom service accounts.
+      #
+      # Building here needs none of it: gh-deploy already has
+      # artifactregistry.writer, which is the only permission a push requires.
+      # No build service account, no staging bucket, no logging config — and
+      # the image is produced by the same docker build that runs locally.
+      #
       # Tag by commit SHA, never `latest`: the SHA is what makes a rollback
       # ("deploy the previous tag") a real operation rather than a guess about
       # which build `latest` currently points at.
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
       - name: Build and push image
         run: |
           IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE}:${GITHUB_SHA}"
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
-          gcloud builds submit apps/api \
-            --project "${PROJECT_ID}" \
-            --region "${REGION}" \
-            --tag "${IMAGE}"
+          docker build -t "${IMAGE}" apps/api
+          docker push "${IMAGE}"
 
       # Migrations run from the image just built, so the schema change and the
       # code expecting it are the same artifact — not two checkouts that could
       # drift. --wait makes the job's exit status gate everything below.
       - name: Run database migrations
         run: |
+          # --service-account is required, and must be the runtime account.
+          # Without it Cloud Run defaults the job to the compute default
+          # service account, and gh-deploy can only impersonate api-runtime
+          # (deliberately — see infra/bootstrap-gcp.sh), so the deploy is
+          # rejected before the job is even created. api-runtime is also the
+          # correct identity on the merits: it is the one holding
+          # cloudsql.client and secretmanager.secretAccessor, which is
+          # precisely what reading DATABASE_URL and connecting to Postgres
+          # needs. The service deploy below sets this too; they must match, or
+          # migrations and the code they migrate for run as different
+          # identities with different database grants.
           gcloud run jobs deploy "${SERVICE}-migrate" \
             --project "${PROJECT_ID}" \
             --region "${REGION}" \
             --image "${IMAGE}" \
+            --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-cloudsql-instances "${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
             --set-env-vars "CLOUD_SQL_CONNECTION_NAME=${{ secrets.CLOUD_SQL_CONNECTION_NAME }}" \
             --set-secrets "DATABASE_URL=database-url:latest" \
@@ -131,13 +162,32 @@ jobs:
             --cpu 1 \
             --memory 512Mi \
             --timeout 60s \
-            --no-allow-unauthenticated
-          # --no-allow-unauthenticated: the service is NOT public. Firebase
-          # Hosting's rewrite invokes it as an authenticated caller, so the
-          # only route in is through Hosting — which is what keeps the app
-          # same-origin. Making this public would let a client reach the API
-          # directly on its *.run.app origin, reintroducing the cross-origin
-          # path packages/api-client/_base.js exists to prevent.
+            --allow-unauthenticated
+          # --allow-unauthenticated is REQUIRED, and does not mean the API is
+          # unprotected.
+          #
+          # It refers to Cloud Run's PLATFORM-level IAM check, not to the
+          # application. Firebase Hosting does not attach an identity token
+          # when it rewrites to Cloud Run, so a service deployed
+          # --no-allow-unauthenticated rejects Hosting's request with Google's
+          # own HTML 403 and the request never reaches the app at all. That
+          # was shipped once and is what a working-but-entirely-unreachable
+          # API looks like: the site loads, every /api/** call returns a 403
+          # HTML page, and nothing in the application logs shows anything,
+          # because nothing arrived.
+          #
+          # What actually guards the API is Firebase ID-token verification on
+          # every route (app/auth.py), plus rate limiting (app/rate_limit.py).
+          # Verified against the deployed service: /api/v1/me and
+          # POST /api/v1/sales both return 401 UNAUTHENTICATED with no token
+          # and with an invalid one.
+          #
+          # This does mean the *.run.app URL is reachable from the internet.
+          # That is not a new exposure of user data: every request there faces
+          # the same token check. It is also not a cross-origin token risk —
+          # packages/api-client/_base.js hardcodes a RELATIVE API_BASE, so the
+          # browser only ever sends bearer tokens to the Hosting origin, no
+          # matter what else happens to be reachable.
           #
           # FIREBASE_AUTH_EMULATOR_HOST is deliberately absent and must stay
           # absent: app/auth.py accepts emulator-signed tokens when it is set,
@@ -159,6 +209,35 @@ jobs:
       # they do not have. Firebase's security comes from Auth tokens and
       # rules, not from hiding the project id. (The service-account key is the
       # actual secret, and it is not here — it never leaves Secret Manager.)
+      # Fail before building rather than after deploying. An unset `vars.*`
+      # resolves to an empty string with no warning, Vite inlines it as
+      # undefined, and src/auth/firebase.js's isFirebaseConfigured comes out
+      # false — producing a bundle that builds, deploys, and reports success
+      # while showing every user "Auth not configured" and offering no way to
+      # sign in. That shipped once. The app degrades gracefully here by
+      # design, which is right at runtime and exactly why CI cannot rely on
+      # noticing the failure downstream.
+      - name: Verify Firebase config is present before building
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+        run: |
+          missing=""
+          [ -n "${VITE_FIREBASE_API_KEY}" ]     || missing="${missing} VITE_FIREBASE_API_KEY"
+          [ -n "${VITE_FIREBASE_AUTH_DOMAIN}" ] || missing="${missing} VITE_FIREBASE_AUTH_DOMAIN"
+          [ -n "${VITE_FIREBASE_PROJECT_ID}" ]  || missing="${missing} VITE_FIREBASE_PROJECT_ID"
+          if [ -n "${missing}" ]; then
+            echo "Missing repository VARIABLES:${missing}" >&2
+            echo "" >&2
+            echo "Set them under Settings -> Secrets and variables -> Actions -> Variables" >&2
+            echo "(the Variables tab, not Secrets — they compile into the client bundle" >&2
+            echo "and are readable by anyone, so secrecy would be illusory)." >&2
+            echo "Without them the build succeeds but ships an app nobody can sign in to." >&2
+            exit 1
+          fi
+          echo "Firebase config present for project: ${VITE_FIREBASE_PROJECT_ID}"
+
       - name: Build outlet app
         env:
           VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
@@ -166,15 +245,56 @@ jobs:
           VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
         run: npm run build:outlet
 
+      # Belt and braces on the ARTIFACT, not the environment: the check above
+      # proves the variables were set, this proves they reached the bundle.
+      # They are different failures — a vite config change, a mode mismatch,
+      # or an env-prefix change would pass the first and fail this one.
+      - name: Verify Firebase config reached the bundle
+        env:
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+        run: |
+          if ! grep -rqF "${VITE_FIREBASE_PROJECT_ID}" --include="*.js" apps/outlet/dist/assets/; then
+            echo "Built bundle does not contain the Firebase project id — the app would" >&2
+            echo "render 'Auth not configured' for every user. Refusing to deploy." >&2
+            exit 1
+          fi
+          echo "Bundle contains the Firebase project id."
+
       - name: Verify emulator host did not leak into the bundle
         # A build that shipped VITE_FIREBASE_AUTH_EMULATOR_HOST would point
         # real cashiers' sign-in at a local emulator that does not exist.
         # Cheap assertion on the actual artifact rather than trust in the env.
+        #
+        # --include="*.js": EXECUTABLE bundle only. vite builds with
+        # sourcemap: true, and a .map embeds the original sources of every
+        # dependency — the Firebase SDK's own sourcemap contains
+        # connectAuthEmulator's JSDoc and its example
+        # 'http://127.0.0.1:9099'. The previous version of this check grepped
+        # the whole directory for a bare "9099" and so failed a perfectly
+        # clean build on a library's documentation comment. A guard that
+        # cries wolf gets deleted by whoever is on call at 2am, so its
+        # precision is the point, not a nicety.
+        #
+        # Matching a host:port rather than the bare port for the same reason:
+        # "9099" is four digits and appears readily in minified output by
+        # coincidence.
         run: |
-          if grep -rq "VITE_FIREBASE_AUTH_EMULATOR_HOST\|9099" apps/outlet/dist/assets/ 2>/dev/null; then
-            echo "Emulator host referenced in production bundle — refusing to deploy." >&2
+          assets="apps/outlet/dist/assets"
+          # Assert the thing we are scanning exists. Without this the grep
+          # below fails on a missing directory, the `if` reads false, and the
+          # step passes green having checked nothing — worse than no guard.
+          if [ ! -d "$assets" ] || ! ls "$assets"/*.js >/dev/null 2>&1; then
+            echo "No built JS found in ${assets} — cannot verify the bundle." >&2
             exit 1
           fi
+          if grep -rlE "VITE_FIREBASE_AUTH_EMULATOR_HOST|(127\.0\.0\.1|localhost|0\.0\.0\.0):[0-9]+" \
+               --include="*.js" "$assets" 2>/dev/null | grep -q .; then
+            echo "Emulator/loopback host referenced in production bundle — refusing to deploy." >&2
+            grep -rlE "VITE_FIREBASE_AUTH_EMULATOR_HOST|(127\.0\.0\.1|localhost|0\.0\.0\.0):[0-9]+" \
+              --include="*.js" "$assets" >&2
+            exit 1
+          fi
+          echo "Bundle clean: no emulator or loopback host in $(ls "$assets"/*.js | wc -l) JS files."
 
       # Deployed with firebase-tools rather than FirebaseExtended's action
       # because that action takes a service-account JSON key as a secret —

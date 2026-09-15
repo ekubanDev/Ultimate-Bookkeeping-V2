@@ -237,6 +237,25 @@ export function AuthProvider({ children }) {
       const { auth, authSdk } = resolved;
 
       unsubscribe = authSdk.onAuthStateChanged(auth, (user) => {
+        // Register the token provider HERE, synchronously, before anything
+        // below can issue a request. It cannot be left to the
+        // [firebaseUser] effect above: that effect runs after React
+        // re-renders, which is after this callback returns — so the getMe()
+        // call a few lines down would go out with the PREVIOUS provider
+        // (() => null on first sign-in) and be rejected with 401
+        // UNAUTHENTICATED / "Missing or malformed Authorization header".
+        //
+        // That is not a race in the flaky sense; it loses every time. It
+        // survived to production because every other call (products, stock
+        // levels, sales) happens later, once the effect has run, so the app
+        // looks functional while /me alone fails — and /me's failure is
+        // handled gracefully by the .catch below, which degrades to the
+        // cached profile instead of surfacing anything.
+        //
+        // The effect above is kept as the declarative source of truth for
+        // any other path that changes firebaseUser; this call makes the
+        // sign-in path correct rather than merely eventually-correct.
+        setTokenProvider(user ? () => user.getIdToken() : () => Promise.resolve(null));
         setFirebaseUser(user ?? null);
 
         if (!user) {
