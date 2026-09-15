@@ -118,7 +118,7 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 cd apps/api && pytest                       # 125, SQLite, no setup needed
 DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 124 + 1 skipped
 
-npm run test:outlet          # 183
+npm run test:outlet          # 187
 npm run test:offline-queue   # 46
 npm run test:api-client      # 10
 npm run build:outlet
@@ -136,7 +136,7 @@ and Postgres physically refuses. The skip is deliberate and explained at the
 is the expected green result, not a masked failure.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
-forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 183
+forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 187
 whether or not you followed the `cp .env.example .env.local` step above.
 Don't remove that override — without it, the tests asserting the Firebase
 SDK is never loaded when unconfigured will instead initialize it for real.
