@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 125, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 124 + 1 skipped
+cd apps/api && pytest                       # 125 + 3 skipped, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 127 + 1 skipped
 
 npm run test:outlet          # 183
 npm run test:offline-queue   # 46
@@ -132,8 +132,13 @@ That same FK enforcement is why the Postgres run reports one skip:
 `test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
 `users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
 and Postgres physically refuses. The skip is deliberate and explained at the
-`skipif` in `tests/test_authz.py` — a Postgres run of 124 passed / 1 skipped
+`skipif` in `tests/test_authz.py` — a Postgres run of 127 passed / 1 skipped
 is the expected green result, not a masked failure.
+
+The skips run the other way too: `tests/test_stock_concurrency.py` (3 tests)
+is Postgres-only. SQLite's shared in-memory connection serializes concurrent
+requests at the driver, so the lost-update race those tests cover cannot
+occur there and a pass would prove nothing.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
 forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 183
