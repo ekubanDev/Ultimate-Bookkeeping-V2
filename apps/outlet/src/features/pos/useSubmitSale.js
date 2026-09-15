@@ -71,10 +71,30 @@ export function buildSaleIntent(
  */
 export function useSubmitSale() {
   const { profile } = useAuth();
+  // 'submitting' is IN FLIGHT (enqueue() has not resolved yet). 'queued' is
+  // a TERMINAL SUCCESS: the intent is durably persisted and will sync when
+  // the network returns. Keeping them distinct matters offline, where
+  // 'queued' is the only outcome a sale can ever reach — collapsing the two
+  // made the confirm button, which disables while "in flight", stay disabled
+  // forever after the first offline sale, so a cashier could record exactly
+  // one sale per session with no network. Online the two states were
+  // indistinguishable only by luck: dispatch usually completed fast enough
+  // that enqueue() returned 'synced'.
   const [status, setStatus] = useState(
-    /** @type {'idle'|'queued'|'synced'|'failed'|'storage_full'} */ ("idle")
+    /** @type {'idle'|'submitting'|'queued'|'synced'|'failed'|'storage_full'} */ ("idle")
   );
   const [error, setError] = useState(null);
+
+  /**
+   * Clears status/error back to 'idle'. Call when STARTING a new sale (see
+   * PosScreen's checkout button) so a terminal state from the previous sale
+   * — a stale 'failed' banner, or a 'queued' that is no longer relevant —
+   * doesn't carry into the next one.
+   */
+  const reset = useCallback(() => {
+    setStatus("idle");
+    setError(null);
+  }, []);
 
   /**
    * @param {{
@@ -105,7 +125,11 @@ export function useSubmitSale() {
       clientId,
     });
 
-    setStatus("queued");
+    // Set BEFORE awaiting enqueue(): this is what the confirm button gates
+    // on, and it is the double-tap guard (PosScreen.test.jsx, Adjoa QA #5) —
+    // a second tap arriving before enqueue() resolves must not build a
+    // second intent with a second client_id.
+    setStatus("submitting");
     setError(null);
 
     try {
@@ -138,5 +162,5 @@ export function useSubmitSale() {
     }
   }, [profile?.id]);
 
-  return { submitSale, status, error };
+  return { submitSale, status, error, reset };
 }

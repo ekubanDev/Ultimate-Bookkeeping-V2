@@ -132,7 +132,13 @@ export default function CheckoutModal({
       ? isValidPercentString(discountValue)
       : isValidMoneyString(discountValue);
   const taxValid = isValidMoneyString(taxAmount);
-  const canConfirm = discountValid && taxValid && status !== "queued";
+  // Gates on 'submitting' (in flight), NOT 'queued'. 'queued' is a terminal
+  // success — the sale is durably persisted and will sync later — and is the
+  // ONLY outcome reachable offline, so blocking on it meant the confirm
+  // button never re-enabled after the first offline sale. See useSubmitSale's
+  // status note. Still the double-tap guard: 'submitting' is set before
+  // enqueue() is awaited (PosScreen.test.jsx, Adjoa QA #5).
+  const canConfirm = discountValid && taxValid && status !== "submitting";
 
   // Client-side estimate only — see previewTotalCents' doc comment above;
   // the server's response total_amount is the figure that actually counts.
@@ -253,7 +259,7 @@ export default function CheckoutModal({
         </p>
       ) : null}
       <Button onClick={handleConfirm} disabled={!canConfirm}>
-        {status === "queued" ? "Recording..." : "Confirm sale"}
+        {status === "submitting" ? "Recording..." : "Confirm sale"}
       </Button>
     </Modal>
   );
