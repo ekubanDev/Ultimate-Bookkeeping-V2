@@ -53,8 +53,8 @@ export interface SaleRequest {
   client_id: string;
   outlet_id: string;
   line_items: SaleLineItemRequest[];
-  /** Optional server-side — see the note above; clients should always send it. */
-  payment_method?: PaymentMethod;
+  /** Required: the server rejects a sale that does not say how it was paid. */
+  payment_method: PaymentMethod;
   /** Cart-level discount kind — percentage or a fixed GHS amount. Server default: "fixed". */
   discount_type?: DiscountType;
   /**
