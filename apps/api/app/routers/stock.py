@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
-from app.authz import resolve_authorized_outlet
+from app.authz import assert_client_id_not_another_tenants, resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError
 from app.models import Product, StockLevel, StockMovement
@@ -112,6 +112,7 @@ async def create_stock_adjustment(
     # --- 1. Idempotency first (design.md §3.4 step 1) ---------------------
     existing = await _fetch_movement_by_client_id(db, payload.client_id)
     if existing is not None:
+        await assert_client_id_not_another_tenants(db, current_user, existing.outlet_id)
         level = await _fetch_level(db, existing.product_id, existing.outlet_id)
         body = _movement_to_response(
             existing, quantity=level.quantity if level is not None else 0, idempotent_replay=True
@@ -188,6 +189,7 @@ async def create_stock_adjustment(
         winner = await _fetch_movement_by_client_id(db, payload.client_id)
         if winner is None:
             raise
+        await assert_client_id_not_another_tenants(db, current_user, winner.outlet_id)
         winner_level = await _fetch_level(db, winner.product_id, winner.outlet_id)
         body = _movement_to_response(
             winner,

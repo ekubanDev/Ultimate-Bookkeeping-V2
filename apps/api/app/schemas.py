@@ -132,7 +132,12 @@ class SaleCreateRequest(BaseModel):
     client_id: str = Field(min_length=1)
     outlet_id: uuid.UUID
     line_items: list[SaleLineItemIn] = Field(min_length=1, max_length=MAX_LINE_ITEMS_PER_SALE)
-    payment_method: str | None = None
+    # Required (code-review decision): a sale recorded with no payment method
+    # is an incomplete financial record, and the value being *representable*
+    # as absent is how it becomes common. Every client already sends it, so
+    # this rejects nothing that was previously succeeding. The RESPONSE field
+    # stays nullable — rows written before this change may hold NULL.
+    payment_method: str = Field(min_length=1)
     # Raw cashier input — server computes `discount_amount` from these, it
     # is never accepted directly (app/pricing.py `compute_discount_amount`).
     # `discount_value` means different things depending on `discount_type`:

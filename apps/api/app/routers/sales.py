@@ -26,7 +26,7 @@ from sqlalchemy.orm import selectinload
 from starlette.responses import JSONResponse
 
 from app.auth import CurrentUser, get_current_user
-from app.authz import resolve_authorized_outlet
+from app.authz import assert_client_id_not_another_tenants, resolve_authorized_outlet
 from app.db import get_db
 from app.errors import AppError, format_money
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement
@@ -81,6 +81,8 @@ async def create_sale(
     # --- 1. Idempotency first (design.md §3.4 step 1) ---------------------
     existing = await _fetch_by_client_id(db, payload.client_id)
     if existing is not None:
+        # A global client_id hit is only OUR replay if the row is ours.
+        await assert_client_id_not_another_tenants(db, current_user, existing.outlet_id)
         body = _sale_to_response(
             existing, price_variance_flagged=_sale_line_items_flagged(existing), idempotent_replay=True
         )
@@ -255,6 +257,7 @@ async def create_sale(
         winner = await _fetch_by_client_id(db, payload.client_id)
         if winner is None:
             raise
+        await assert_client_id_not_another_tenants(db, current_user, winner.outlet_id)
         body = _sale_to_response(
             winner, price_variance_flagged=_sale_line_items_flagged(winner), idempotent_replay=True
         )
