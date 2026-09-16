@@ -85,3 +85,44 @@ describe("route patterns stay in sync with what classifyApiRequest documents", (
     expect(OTHER_API_PATTERN.test("/api/v1/products")).toBe(true);
   });
 });
+
+describe("patterns match the FULL URL, which is what Workbox tests them against", () => {
+  // Regression cover for a bug that survived review, the test suite and a
+  // live deployment: every pattern was anchored with ^ and so could only
+  // match a bare path. Workbox matches a RegExp `urlPattern` against the
+  // full request URL, so at runtime none of them matched and the products
+  // catalog was never cached — the POS showed nothing offline.
+  //
+  // The existing tests in this file pass PATHS, which matched fine either
+  // way. That is the gap: one RegExp, two input domains, nothing asserting
+  // they agree. These cases pin the domain that actually runs in production.
+  const ORIGIN = "https://ultimate-bookkeeping-v2.web.app";
+
+  it("matches the products read as a full URL, not only as a path", () => {
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/products`)).toBe(true);
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/products?outlet_id=outlet-1`)).toBe(true);
+  });
+
+  it("still matches the bare path, so classifyApiRequest keeps working", () => {
+    expect(PRODUCTS_READ_PATTERN.test("/api/v1/products?outlet_id=outlet-1")).toBe(true);
+  });
+
+  it("matches stock levels and the catch-all as full URLs too", () => {
+    expect(STOCK_LEVELS_READ_PATTERN.test(`${ORIGIN}/api/v1/stock/levels?outlet_id=o1`)).toBe(true);
+    expect(OTHER_API_PATTERN.test(`${ORIGIN}/api/v1/sales`)).toBe(true);
+  });
+
+  it("does not let the products pattern swallow a different endpoint", () => {
+    // Dropping the ^ anchor widens the match, so confirm it did not widen
+    // into routes that must never be served from a cache.
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/sales`)).toBe(false);
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/products/123`)).toBe(false);
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/stock/levels`)).toBe(false);
+    expect(PRODUCTS_READ_PATTERN.test(`${ORIGIN}/api/v1/me`)).toBe(false);
+  });
+
+  it("classifies a full URL the same way it classifies the path", () => {
+    expect(classifyApiRequest(`${ORIGIN}/api/v1/products?outlet_id=o1`, "GET")).toBe("products-read");
+    expect(classifyApiRequest(`${ORIGIN}/api/v1/sales`, "POST")).toBe("other-api");
+  });
+});

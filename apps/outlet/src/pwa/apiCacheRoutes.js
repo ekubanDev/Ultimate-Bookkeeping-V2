@@ -24,14 +24,35 @@
  * *data* (this file's approach) has no such problem.
  */
 
-/** GET /api/v1/products (with or without a query string). */
-export const PRODUCTS_READ_PATTERN = /^\/api\/v1\/products(\?.*)?$/;
+// NOT ANCHORED WITH ^ — deliberately, and this is the whole bug these
+// patterns once had.
+//
+// Workbox tests a RegExp `urlPattern` against the FULL request URL
+// ("https://host/api/v1/products?outlet_id=…"), not against the path.
+// Anchoring to ^ meant these could only ever match a bare path, so at
+// runtime NONE of the three matched anything.
+//
+// Only one of the three showed a symptom. PRODUCTS is the sole route with a
+// caching handler (StaleWhileRevalidate), so its failure to match meant the
+// catalog was never cached and the POS was empty offline — the app's central
+// promise. The other two are NetworkOnly, and a route that never matches
+// also goes to the network, so those two were broken in a way that is
+// indistinguishable from working. That is why this survived review, tests
+// and a live deployment.
+//
+// The unit tests below pass PATHS and so matched happily either way; Workbox
+// passes URLs and did not. Same RegExp object, two different input domains,
+// nothing checking that they agreed. apiCacheRoutes.test.js now asserts both
+// shapes for exactly this reason.
 
-/** GET /api/v1/stock/levels (with or without a query string). */
-export const STOCK_LEVELS_READ_PATTERN = /^\/api\/v1\/stock\/levels(\?.*)?$/;
+/** GET /api/v1/products (with or without a query string). Matches path or full URL. */
+export const PRODUCTS_READ_PATTERN = /\/api\/v1\/products(\?.*)?$/;
+
+/** GET /api/v1/stock/levels (with or without a query string). Matches path or full URL. */
+export const STOCK_LEVELS_READ_PATTERN = /\/api\/v1\/stock\/levels(\?.*)?$/;
 
 /** Any other /api/v1/* request — reads not on the allowlist above, and every mutation. */
-export const OTHER_API_PATTERN = /^\/api\/v1\//;
+export const OTHER_API_PATTERN = /\/api\/v1\//;
 
 /**
  * classifyApiRequest — pure decision function mirroring the runtime-caching

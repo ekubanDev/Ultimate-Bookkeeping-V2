@@ -143,9 +143,9 @@ jobs:
       # fails the job (non-zero exit) if the script is missing or renamed —
       # this deliberately cannot pass vacuously.
       # Counts in these labels drift silently — they were 111/27/5 while the
-      # suites had grown to 187/46/10. They're a reading aid, not an
+      # suites had grown to 192/46/10. They're a reading aid, not an
       # assertion; the `npm run` invocation is what actually gates.
-      - name: Test — outlet app (187 tests)
+      - name: Test — outlet app (192 tests)
         run: npm run test:outlet
 
       - name: Test — offline-queue package (46 tests)
