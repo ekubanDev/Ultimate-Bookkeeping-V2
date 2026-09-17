@@ -333,6 +333,64 @@ class StockLevelResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProductCreateRequest(BaseModel):
+    """POST /api/v1/products — admin only.
+
+    Exists because there was previously NO supported way to create a
+    product: the router was GET-only, and the alternatives were seed_dev.py
+    (a fixed demo catalog) or raw SQL against production. A pilot outlet's
+    real catalog could not be loaded at all.
+
+    `outlet_id` identifies the TENANT, not a per-outlet catalog: products
+    belong to an admin (products.admin_id), and every outlet that admin owns
+    shares them. It is spelled as outlet_id to reuse `resolve_authorized_outlet`
+    unchanged — the same resolution and ownership check GET already performs
+    (app/routers/products.py), rather than a second, subtly different tenant
+    path for writes.
+    """
+
+    outlet_id: uuid.UUID
+    name: str = Field(min_length=1, max_length=200)
+    unit_price: str
+    # Nullable in the table for unbarcoded items, and the partial unique
+    # index on (admin_id, sku) is scoped to `sku IS NOT NULL` for exactly
+    # that reason — two unbarcoded products are not a duplicate.
+    sku: str | None = Field(default=None, max_length=64)
+    min_stock: int | None = Field(default=None, ge=0)
+
+    _validate_unit_price = field_validator("unit_price")(validate_money_string)
+
+    @property
+    def unit_price_decimal(self) -> Decimal:
+        return Decimal(self.unit_price)
+
+
+class ProductUpdateRequest(BaseModel):
+    """PATCH /api/v1/products/{id} — admin only. All fields optional.
+
+    Price correction is the common case and the reason attribution was added
+    to the table alongside this endpoint: `unit_price` is what the POS
+    charges AND what price_variance_flagged is measured against
+    (app/pricing.py), so changing it silently redefines which past-and-future
+    sales look suspicious.
+    """
+
+    outlet_id: uuid.UUID
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    unit_price: str | None = None
+    sku: str | None = Field(default=None, max_length=64)
+    min_stock: int | None = Field(default=None, ge=0)
+
+    @field_validator("unit_price")
+    @classmethod
+    def _validate_optional_unit_price(cls, value: str | None) -> str | None:
+        return None if value is None else validate_money_string(value)
+
+    @property
+    def unit_price_decimal(self) -> Decimal | None:
+        return None if self.unit_price is None else Decimal(self.unit_price)
+
+
 class ProductResponse(BaseModel):
     """GET /api/v1/products — frozen contract (task spec); Kojo builds
     against this exact shape. Not yet in api-contracts.md — flagged for
