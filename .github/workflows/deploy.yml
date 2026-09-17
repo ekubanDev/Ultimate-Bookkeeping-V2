@@ -146,6 +146,21 @@ jobs:
             --region "${REGION}" \
             --wait
 
+      # --max-instances is HALF of a connection-budget inequality whose other
+      # half lives in apps/api/app/db.py (POOL_SIZE + MAX_OVERFLOW). Postgres
+      # refuses connections past max_connections — 25 on db-f1-micro — and
+      # Cloud Run multiplies each container's pool by the instance count.
+      # 10 x 7 = 70 against 25 was the previous setting; under load Postgres
+      # would have started refusing connections before Cloud Run looked busy,
+      # surfacing as random 5xx on sales rather than as anything resembling
+      # capacity. apps/api/tests/test_connection_budget.py asserts the
+      # arithmetic by reading BOTH files. Raise this only together with the
+      # Cloud SQL tier.
+      #
+      # Keep notes like this OUT of the `run:` block below: a `#` line inside
+      # a backslash-continued command truncates it, and the remaining flags
+      # become a separate command that fails. That would have silently dropped
+      # --allow-unauthenticated and taken the API offline.
       - name: Deploy Cloud Run service
         run: |
           gcloud run deploy "${SERVICE}" \
@@ -158,7 +173,7 @@ jobs:
             --set-secrets "DATABASE_URL=database-url:latest" \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --min-instances 0 \
-            --max-instances 10 \
+            --max-instances 4 \
             --cpu 1 \
             --memory 512Mi \
             --timeout 60s \

@@ -68,6 +68,41 @@ def cloud_sql_connect_args() -> dict[str, str]:
 
 _connect_args: dict[str, str] = cloud_sql_connect_args()
 
+# CONNECTION BUDGET — these four numbers are one arithmetic statement, and
+# breaking it is silent until load arrives.
+#
+# Postgres refuses connections past `max_connections`, which on Cloud SQL is
+# a function of the machine tier, NOT something this app configures:
+# db-f1-micro allows 25 (verified against the live instance). Cloud Run
+# multiplies whatever pool each container holds by however many containers
+# it decides to run. So the real constraint is:
+#
+#     max-instances x (pool_size + max_overflow)  <=  usable connections
+#
+# It was previously violated by a factor of nearly three — max-instances 10
+# x (5 + 2) = 70 against a ceiling of 25 — while the comment here claimed
+# the pool "keeps total connections under that ceiling as instance count
+# grows". It does not; the pool size alone says nothing without the instance
+# count, and that number lives in a different file (.github/workflows/
+# deploy.yml). Under sustained load Postgres would have started refusing
+# connections before Cloud Run looked busy, so the symptom would have
+# appeared as random 5xx on sales rather than as anything resembling
+# capacity.
+#
+# tests/test_connection_budget.py asserts the inequality by reading BOTH
+# files, because that is the only place the two halves meet.
+CLOUD_SQL_MAX_CONNECTIONS = 25  # db-f1-micro; re-check if the tier changes
+
+# Held back from the service: Postgres reserves 3 for superusers, and
+# operations need headroom — the Alembic migration job (NullPool, 1
+# connection, see alembic/env.py), a Cloud SQL Auth Proxy session for
+# debugging, the occasional psql.
+RESERVED_CONNECTIONS = 9
+
+POOL_SIZE = 3
+MAX_OVERFLOW = 1
+CONNECTIONS_PER_CONTAINER = POOL_SIZE + MAX_OVERFLOW
+
 engine = create_async_engine(
     DATABASE_URL,
     future=True,
@@ -79,12 +114,12 @@ engine = create_async_engine(
     # sync, which the offline queue would then retry against an endpoint that
     # is actually healthy. Cheap round-trip; worth it.
     pool_pre_ping=True,
-    # Cloud Run scales to many small instances rather than few large ones, and
-    # Cloud SQL enforces a per-instance connection ceiling (~25 on db-f1-micro).
-    # A small pool per container keeps total connections under that ceiling as
-    # instance count grows.
-    pool_size=5,
-    max_overflow=2,
+    # Small on purpose — see the connection budget above. Requests wait for a
+    # pooled connection rather than opening a new one, which is the correct
+    # trade here: a cashier waiting 50ms for a pool slot is fine, a sale
+    # failing because Postgres refused the connection is not.
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
     pool_recycle=1800,
 )
 SessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
