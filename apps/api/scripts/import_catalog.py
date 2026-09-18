@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 import getpass
 import os
 import re
@@ -180,6 +181,42 @@ def reject_duplicates(rows: list[dict]) -> None:
             raise SystemExit(2)
 
 
+def write_with_retry(
+    send, *, description: str, max_attempts: int = 6
+) -> "httpx.Response":
+    """Perform one write, honouring the API's own retryability signal.
+
+    The write endpoints are rate limited (30/minute — app/rate_limit.py), and
+    a bulk catalog import is exactly the shape that trips it. The limiter
+    answers 429 with `retryable: true` in the standard error envelope, which
+    is the same field packages/offline-queue branches on to decide whether a
+    queued sale is retried or surfaced as failed.
+
+    The first version of this importer ignored that and recorded all 183
+    rate-limited writes as permanent failures — reading the flag and then
+    doing nothing with it. Backing off is the whole point of the server
+    bothering to say so.
+
+    Honours Retry-After when the limiter sends one, otherwise backs off
+    exponentially. Only 429 is retried: a 409 duplicate SKU or a 422
+    validation failure will fail identically no matter how long you wait.
+    """
+    delay = 2.0
+    for attempt in range(1, max_attempts + 1):
+        response = send()
+        if response.status_code != 429:
+            return response
+        if attempt == max_attempts:
+            return response
+        retry_after = response.headers.get("Retry-After")
+        wait = float(retry_after) if (retry_after or "").replace(".", "", 1).isdigit() else delay
+        print(f"    rate limited on {description}; waiting {wait:.0f}s "
+              f"(attempt {attempt}/{max_attempts})")
+        time.sleep(wait)
+        delay = min(delay * 2, 60.0)
+    return response
+
+
 def sign_in(api_key: str, email: str) -> str:
     """Exchange an admin's email/password for a Firebase ID token.
 
@@ -228,6 +265,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="Firebase web API key. Usually unnecessary — discovered from "
                              "$VITE_FIREBASE_API_KEY or apps/outlet/.env.local. Public either "
                              "way; it ships in the client bundle.")
+    parser.add_argument("--rate", type=int, default=25,
+                        help="Writes per minute. Default 25, just under the server's "
+                             "30/minute limit (app/rate_limit.py). Lower it if the limit changes.")
     parser.add_argument("--apply", action="store_true",
                         help="Actually write. Without this the run is a dry run and changes nothing.")
     args = parser.parse_args(argv)
@@ -274,20 +314,41 @@ def main(argv: list[str] | None = None) -> None:
             print("\nDRY RUN — nothing was written. Re-run with --apply to commit.")
             return
 
+        # Pace writes under the server's limit rather than sprinting into it
+        # and relying on retries to clean up. `interval` is the gap that keeps
+        # a sustained run just below WRITE_RATE_LIMIT.
+        interval = 60.0 / max(args.rate, 1)
+        total = len(creates) + len(updates)
+        print(f"\nwriting {total} change(s) at ~{args.rate}/min "
+              f"(about {total * interval / 60:.1f} minutes)\n")
+
         failures = []
+        done = 0
         for row in creates:
-            response = client.post("/api/v1/products", json={
-                "outlet_id": args.outlet_id, "name": row["name"],
-                "unit_price": row["unit_price"], "sku": row["sku"],
-            })
+            response = write_with_retry(
+                lambda r=row: client.post("/api/v1/products", json={
+                    "outlet_id": args.outlet_id, "name": r["name"],
+                    "unit_price": r["unit_price"], "sku": r["sku"],
+                }),
+                description=row["sku"],
+            )
             if response.status_code != 201:
                 failures.append((row, response.status_code, response.text[:160]))
+            done += 1
+            if done % 25 == 0:
+                print(f"    {done}/{total}")
+            time.sleep(interval)
         for row, current in updates:
-            response = client.patch(f"/api/v1/products/{current['id']}", json={
-                "outlet_id": args.outlet_id, "name": row["name"], "unit_price": row["unit_price"],
-            })
+            response = write_with_retry(
+                lambda r=row, c=current: client.patch(f"/api/v1/products/{c['id']}", json={
+                    "outlet_id": args.outlet_id, "name": r["name"], "unit_price": r["unit_price"],
+                }),
+                description=row["sku"],
+            )
             if response.status_code != 200:
                 failures.append((row, response.status_code, response.text[:160]))
+            done += 1
+            time.sleep(interval)
 
         print(f"\ncreated {len(creates) - sum(1 for f in failures if f[0] in creates)}, "
               f"updated {len(updates) - sum(1 for f in failures if any(f[0] is r for r, _ in updates))}")

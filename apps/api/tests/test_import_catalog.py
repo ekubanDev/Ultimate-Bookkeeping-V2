@@ -23,6 +23,7 @@ from scripts.import_catalog import (
     read_rows,
     reject_duplicates,
     slugify_sku,
+    write_with_retry,
 )
 
 
@@ -202,3 +203,64 @@ def test_a_placeholder_is_not_mistaken_for_a_key(monkeypatch, tmp_path):
     # File-sourced values must look like a real key to be used.
     from scripts import import_catalog
     assert (discover_api_key() or "AIzaSy").startswith("AIzaSy")
+
+# --- rate-limit handling --------------------------------------------------
+
+
+class _Resp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = ""
+
+
+def test_retries_a_429_and_returns_the_eventual_success(monkeypatch):
+    """The API answers a rate-limited write with retryable: true. The first
+    version of this importer read that field and did nothing with it, turning
+    183 temporary refusals into permanent failures."""
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    responses = iter([_Resp(429), _Resp(429), _Resp(201)])
+    result = write_with_retry(lambda: next(responses), description="X")
+    assert result.status_code == 201
+
+
+def test_does_not_retry_a_permanent_failure(monkeypatch):
+    """A 409 duplicate SKU or a 422 fails identically however long you wait —
+    retrying it just delays the report."""
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    calls = []
+
+    def send():
+        calls.append(1)
+        return _Resp(409)
+
+    assert write_with_retry(send, description="X").status_code == 409
+    assert len(calls) == 1
+
+
+def test_gives_up_rather_than_retrying_forever(monkeypatch):
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    calls = []
+
+    def send():
+        calls.append(1)
+        return _Resp(429)
+
+    assert write_with_retry(send, description="X", max_attempts=3).status_code == 429
+    assert len(calls) == 3
+
+
+def test_honours_retry_after_when_the_limiter_sends_one(monkeypatch):
+    slept = []
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", slept.append)
+    responses = iter([_Resp(429, {"Retry-After": "17"}), _Resp(201)])
+    write_with_retry(lambda: next(responses), description="X")
+    assert slept == [17.0]
+
+
+def test_backs_off_exponentially_without_a_retry_after_header(monkeypatch):
+    slept = []
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", slept.append)
+    responses = iter([_Resp(429), _Resp(429), _Resp(429), _Resp(201)])
+    write_with_retry(lambda: next(responses), description="X")
+    assert slept == sorted(slept) and len(set(slept)) > 1, f"not backing off: {slept}"
