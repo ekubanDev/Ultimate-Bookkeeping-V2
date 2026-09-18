@@ -23,6 +23,9 @@ from scripts.import_catalog import (
     read_rows,
     reject_duplicates,
     slugify_sku,
+    plan_restock,
+    restock_client_id,
+    write_with_retry,
 )
 
 
@@ -202,3 +205,127 @@ def test_a_placeholder_is_not_mistaken_for_a_key(monkeypatch, tmp_path):
     # File-sourced values must look like a real key to be used.
     from scripts import import_catalog
     assert (discover_api_key() or "AIzaSy").startswith("AIzaSy")
+
+
+# --- rate-limit handling --------------------------------------------------
+
+
+class _Resp:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = ""
+
+
+def test_retries_a_429_and_returns_the_eventual_success(monkeypatch):
+    """The API answers a rate-limited write with retryable: true. The first
+    version of this importer read that field and did nothing with it, turning
+    183 temporary refusals into permanent failures."""
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    responses = iter([_Resp(429), _Resp(429), _Resp(201)])
+    result = write_with_retry(lambda: next(responses), description="X")
+    assert result.status_code == 201
+
+
+def test_does_not_retry_a_permanent_failure(monkeypatch):
+    """A 409 duplicate SKU or a 422 fails identically however long you wait —
+    retrying it just delays the report."""
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    calls = []
+
+    def send():
+        calls.append(1)
+        return _Resp(409)
+
+    assert write_with_retry(send, description="X").status_code == 409
+    assert len(calls) == 1
+
+
+def test_gives_up_rather_than_retrying_forever(monkeypatch):
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", lambda _: None)
+    calls = []
+
+    def send():
+        calls.append(1)
+        return _Resp(429)
+
+    assert write_with_retry(send, description="X", max_attempts=3).status_code == 429
+    assert len(calls) == 3
+
+
+def test_honours_retry_after_when_the_limiter_sends_one(monkeypatch):
+    slept = []
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", slept.append)
+    responses = iter([_Resp(429, {"Retry-After": "17"}), _Resp(201)])
+    write_with_retry(lambda: next(responses), description="X")
+    assert slept == [17.0]
+
+
+def test_backs_off_exponentially_without_a_retry_after_header(monkeypatch):
+    slept = []
+    monkeypatch.setattr("scripts.import_catalog.time.sleep", slept.append)
+    responses = iter([_Resp(429), _Resp(429), _Resp(429), _Resp(201)])
+    write_with_retry(lambda: next(responses), description="X")
+    assert slept == sorted(slept) and len(set(slept)) > 1, f"not backing off: {slept}"
+
+
+# --- opening stock --------------------------------------------------------
+
+
+def _row(sku, quantity):
+    return {"sku": sku, "name": sku.title(), "unit_price": "10.00",
+            "quantity": quantity, "line": 2}
+
+
+def test_plans_the_delta_needed_to_reach_the_target(tmp_path):
+    planned, over = plan_restock([_row("A", 50)], {"A": 20})
+    assert planned == [(_row("A", 50), 30)]
+    assert over == []
+
+
+def test_treats_an_absent_product_as_zero_stock():
+    planned, _ = plan_restock([_row("A", 50)], {})
+    assert planned[0][1] == 50
+
+
+def test_skips_a_product_already_at_target():
+    """Re-running a completed import must be a no-op, not a doubling."""
+    planned, over = plan_restock([_row("A", 50)], {"A": 50})
+    assert planned == [] and over == []
+
+
+def test_tops_up_rather_than_doubling_after_a_partial_run():
+    """The delta is computed against CURRENT stock, so a run interrupted
+    halfway resumes instead of adding the full CSV figure again."""
+    planned, _ = plan_restock([_row("A", 100)], {"A": 60})
+    assert planned[0][1] == 40
+
+
+def test_never_removes_stock_and_reports_the_discrepancy():
+    """More stock than the CSV says means a sale since the export, or a stale
+    file. Writing a negative adjustment to force a match would destroy real
+    inventory on the strength of a spreadsheet."""
+    planned, over = plan_restock([_row("A", 10)], {"A": 25})
+    assert planned == []
+    assert over == [(_row("A", 10), 25)]
+
+
+def test_restock_client_id_is_stable_for_the_same_adjustment():
+    """Idempotency: a retry replays rather than adding the stock twice."""
+    a = restock_client_id("outlet-1", "SKU-A", 30)
+    b = restock_client_id("outlet-1", "SKU-A", 30)
+    assert a == b
+
+
+def test_restock_client_id_differs_per_product_outlet_and_delta():
+    base = restock_client_id("outlet-1", "SKU-A", 30)
+    assert base != restock_client_id("outlet-2", "SKU-A", 30)
+    assert base != restock_client_id("outlet-1", "SKU-B", 30)
+    assert base != restock_client_id("outlet-1", "SKU-A", 31)
+
+
+def test_restock_client_id_is_a_uuid():
+    """The server's client_id is an idempotency key; a UUID keeps it
+    unguessable and collision-free across tenants."""
+    import uuid as _uuid
+    _uuid.UUID(restock_client_id("o", "SKU", 1))
