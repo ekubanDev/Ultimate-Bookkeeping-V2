@@ -30,10 +30,21 @@ CSV FORMAT
     Product,Price,Quantity
     Outre Braid,27.5,13829
 
-`Quantity` is read and reported but NOT written: stock is a separate
-concern owned by POST /api/v1/stock/adjustments, and duplicating that here
-would reintroduce the read-modify-write race that endpoint was fixed for.
-The importer prints the restock commands to run afterwards.
+`Quantity` is only written with --restock, and then only through
+POST /api/v1/stock/adjustments — never by touching stock_levels.
+
+That matters more than it looks. stock_movements is an append-only ledger;
+stock_levels is a CACHE of its sum, so the POS can read a quantity without
+aggregating history (routers/stock.py). The adjustments endpoint writes BOTH
+in one transaction, under a row lock, refusing anything that would take
+stock negative. Writing the cache directly would skip the lock (the oversell
+race), skip the ledger entry, and permanently break the invariant that
+quantity equals the sum of movements.
+
+seed_dev.py does write stock_levels directly, and the consequence is
+visible: its products have stock no movement explains, so reconciling them
+needs the seeded baseline known out of band. Acceptable for eight demo rows;
+not for a real shop's opening inventory.
 
 REQUIREMENTS
     An operator tool, run from a dev install (`pip install -e ".[dev]"`) —
@@ -57,6 +68,7 @@ import os
 import re
 import sys
 import unicodedata
+import uuid
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -217,6 +229,50 @@ def write_with_retry(
     return response
 
 
+def restock_client_id(outlet_id: str, sku: str, delta: int) -> str:
+    """Deterministic idempotency key for one opening-stock adjustment.
+
+    uuid5 over (outlet, sku, delta) so re-running the same import replays
+    rather than adding the stock a second time — the server recognises the
+    client_id and returns the original movement (design.md §3.4).
+
+    Keyed on delta as well as sku because a DIFFERENT delta is a different
+    event: if the count changes, that is a new adjustment, not a replay of
+    the old one.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"catalog-import:{outlet_id}:{sku}:{delta}"))
+
+
+def fetch_levels(client: "httpx.Client", outlet_id: str) -> dict[str, int]:
+    """Current stock, keyed by SKU."""
+    response = client.get("/api/v1/stock/levels", params={"outlet_id": outlet_id})
+    response.raise_for_status()
+    return {lvl["sku"]: lvl["quantity"] for lvl in response.json() if lvl.get("sku")}
+
+
+def plan_restock(rows: list[dict], levels: dict[str, int]) -> tuple[list[tuple[dict, int]], list[tuple[dict, int]]]:
+    """Work out the delta needed to reach each row's target quantity.
+
+    Computed against current stock rather than blindly adding the CSV figure,
+    so a re-run after a partial failure tops up the difference instead of
+    doubling what already landed.
+
+    Never removes stock. A product holding MORE than the CSV says is reported
+    for a human to look at: the likely causes are a sale since the export or
+    a stale file, and silently writing a negative adjustment to force a match
+    would destroy real inventory on the strength of a spreadsheet.
+    """
+    planned, over = [], []
+    for row in rows:
+        current = levels.get(row["sku"], 0)
+        target = row["quantity"]
+        if target > current:
+            planned.append((row, target - current))
+        elif target < current:
+            over.append((row, current))
+    return planned, over
+
+
 def sign_in(api_key: str, email: str) -> str:
     """Exchange an admin's email/password for a Firebase ID token.
 
@@ -265,6 +321,13 @@ def main(argv: list[str] | None = None) -> None:
                         help="Firebase web API key. Usually unnecessary — discovered from "
                              "$VITE_FIREBASE_API_KEY or apps/outlet/.env.local. Public either "
                              "way; it ships in the client bundle.")
+    parser.add_argument("--rate", type=int, default=25,
+                        help="Writes per minute. Default 25, just under the server's "
+                             "30/minute limit (app/rate_limit.py). Lower it if the limit changes.")
+    parser.add_argument("--restock", action="store_true",
+                        help="Also bring stock up to the CSV's Quantity, via "
+                             "POST /stock/adjustments with reason='restock'. Computes the "
+                             "delta against current stock; never removes any.")
     parser.add_argument("--apply", action="store_true",
                         help="Actually write. Without this the run is a dry run and changes nothing.")
     args = parser.parse_args(argv)
@@ -347,6 +410,9 @@ def main(argv: list[str] | None = None) -> None:
             done += 1
             time.sleep(interval)
 
+        # Re-read so restock (below) has the ids of products just created.
+        product_ids = {sku: p["id"] for sku, p in fetch_existing(client, args.outlet_id).items()}
+
         print(f"\ncreated {len(creates) - sum(1 for f in failures if f[0] in creates)}, "
               f"updated {len(updates) - sum(1 for f in failures if any(f[0] is r for r, _ in updates))}")
         if failures:
@@ -355,10 +421,62 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"  {row['sku']} (line {row['line']}): HTTP {status} {body}", file=sys.stderr)
             raise SystemExit(1)
 
-        stocked = [r for r in rows if r["quantity"] > 0]
-        print(f"\nStock NOT imported — it belongs to POST /api/v1/stock/adjustments, which owns "
-              f"the locking this script deliberately does not reimplement.\n"
-              f"{len(stocked)} products have opening stock ({sum(r['quantity'] for r in stocked):,} units).")
+        if not args.restock:
+            stocked = [r for r in rows if r["quantity"] > 0]
+            print(f"\nStock not touched. Re-run with --restock to bring it up to the CSV's "
+                  f"Quantity via POST /stock/adjustments — {len(stocked)} products carry "
+                  f"opening stock ({sum(r['quantity'] for r in stocked):,} units).")
+            return
+
+        # --- opening stock ------------------------------------------------
+        # Through the adjustments endpoint, so each unit gets a ledger entry
+        # and stock_levels stays equal to the sum of stock_movements. See this
+        # module's docstring for why writing the cache directly is not an
+        # option.
+        print("\nSTOCK")
+        levels = fetch_levels(client, args.outlet_id)
+        planned, over = plan_restock(rows, levels)
+
+        if over:
+            print(f"  {len(over)} product(s) hold MORE than the CSV says — left alone:")
+            for row, current in over[:10]:
+                print(f"    {row['sku']}: have {current}, CSV says {row['quantity']}")
+            if len(over) > 10:
+                print(f"    ... and {len(over) - 10} more")
+            print("    (a sale since the export, or a stale file — check before forcing it)")
+
+        if not planned:
+            print("  nothing to add; stock already matches.")
+            return
+
+        units = sum(delta for _, delta in planned)
+        print(f"  {len(planned)} adjustment(s), {units:,} units, "
+              f"about {len(planned) * (60.0 / max(args.rate, 1)) / 60:.1f} minutes")
+
+        stock_failures = []
+        for index, (row, delta) in enumerate(planned, start=1):
+            response = write_with_retry(
+                lambda r=row, d=delta: client.post("/api/v1/stock/adjustments", json={
+                    "client_id": restock_client_id(args.outlet_id, r["sku"], d),
+                    "product_id": product_ids[r["sku"]],
+                    "outlet_id": args.outlet_id,
+                    "reason": "restock",
+                    "delta": d,
+                }),
+                description=row["sku"],
+            )
+            if response.status_code not in (200, 201):
+                stock_failures.append((row, response.status_code, response.text[:160]))
+            if index % 25 == 0:
+                print(f"    {index}/{len(planned)}")
+            time.sleep(60.0 / max(args.rate, 1))
+
+        print(f"\n  restocked {len(planned) - len(stock_failures)}/{len(planned)}")
+        if stock_failures:
+            print(f"\n  {len(stock_failures)} FAILED:", file=sys.stderr)
+            for row, status, body in stock_failures:
+                print(f"    {row['sku']}: HTTP {status} {body}", file=sys.stderr)
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
