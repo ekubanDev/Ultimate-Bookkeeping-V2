@@ -66,6 +66,36 @@ IDENTITY_TOOLKIT = "https://identitytoolkit.googleapis.com/v1/accounts:signInWit
 MAX_SKU_LENGTH = 64
 
 
+def discover_api_key() -> str | None:
+    """Find the Firebase web API key without making the operator paste it.
+
+    It is not a secret — it is compiled into the client bundle every visitor
+    downloads, and it identifies the project rather than authorising
+    anything. So requiring it as an argument was friction with no security
+    benefit: the value is already sitting in apps/outlet/.env.local, which is
+    where a developer running this has it.
+
+    Checked in order: the env var, then the outlet app's .env.local, then its
+    .env.example (which carries a placeholder in a fresh checkout — hence the
+    AIzaSy prefix check, so a placeholder is not mistaken for a real key).
+    """
+    from_env = os.environ.get("VITE_FIREBASE_API_KEY")
+    if from_env:
+        return from_env
+
+    outlet = Path(__file__).resolve().parents[3] / "apps" / "outlet"
+    for candidate in (outlet / ".env.local", outlet / ".env.example"):
+        if not candidate.exists():
+            continue
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "VITE_FIREBASE_API_KEY":
+                value = value.strip().strip("\"'")
+                if value.startswith("AIzaSy"):
+                    return value
+    return None
+
+
 def slugify_sku(name: str) -> str:
     """Derive a stable SKU from a product name.
 
@@ -194,20 +224,27 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--base-url", required=True, help="e.g. https://ultimate-bookkeeping-v2.web.app")
     parser.add_argument("--outlet-id", required=True, help="Identifies the tenant whose catalog this is")
     parser.add_argument("--email", required=True, help="An ADMIN account — managers cannot write the catalog")
-    parser.add_argument("--api-key", default=os.environ.get("VITE_FIREBASE_API_KEY"),
-                        help="Firebase web API key (public; also in the client bundle)")
+    parser.add_argument("--api-key", default=None,
+                        help="Firebase web API key. Usually unnecessary — discovered from "
+                             "$VITE_FIREBASE_API_KEY or apps/outlet/.env.local. Public either "
+                             "way; it ships in the client bundle.")
     parser.add_argument("--apply", action="store_true",
                         help="Actually write. Without this the run is a dry run and changes nothing.")
     args = parser.parse_args(argv)
 
-    if not args.api_key:
-        raise SystemExit("--api-key is required (or set VITE_FIREBASE_API_KEY)")
+    api_key = args.api_key or discover_api_key()
+    if not api_key:
+        raise SystemExit(
+            "Could not find the Firebase web API key. Pass --api-key, set "
+            "VITE_FIREBASE_API_KEY, or ensure apps/outlet/.env.local has it. "
+            "(It is not a secret — it is in the client bundle.)"
+        )
 
     rows = read_rows(args.csv_path)
     reject_duplicates(rows)
     print(f"read {len(rows)} products from {args.csv_path}")
 
-    token = sign_in(args.api_key, args.email)
+    token = sign_in(api_key, args.email)
     with httpx.Client(base_url=args.base_url.rstrip("/"),
                       headers={"Authorization": f"Bearer {token}"}, timeout=60) as client:
         existing = fetch_existing(client, args.outlet_id)
