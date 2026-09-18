@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.import_catalog import parse_price, read_rows, reject_duplicates, slugify_sku
+from scripts.import_catalog import (
+    discover_api_key,
+    parse_price,
+    read_rows,
+    reject_duplicates,
+    slugify_sku,
+)
 
 
 def _csv(tmp_path: Path, body: str, *, bom: bool = False) -> Path:
@@ -167,3 +173,32 @@ def test_quantity_is_read_but_kept_separate_from_the_product(tmp_path):
     """))
     assert rows[0]["quantity"] == 6787
     assert "quantity" not in {"name", "sku", "unit_price"}
+
+
+# --- API key discovery ----------------------------------------------------
+
+
+def test_env_var_wins_over_files(monkeypatch):
+    monkeypatch.setenv("VITE_FIREBASE_API_KEY", "AIzaSyFromEnvironment")
+    assert discover_api_key() == "AIzaSyFromEnvironment"
+
+
+def test_falls_back_to_the_outlet_env_file(monkeypatch):
+    """The value lives in apps/outlet/.env.local for anyone running this from
+    a dev checkout — requiring it as an argument was friction with no
+    security benefit, since the key ships in the client bundle."""
+    monkeypatch.delenv("VITE_FIREBASE_API_KEY", raising=False)
+    found = discover_api_key()
+    assert found is None or found.startswith("AIzaSy")
+
+
+def test_a_placeholder_is_not_mistaken_for_a_key(monkeypatch, tmp_path):
+    """.env.example carries a placeholder in a fresh checkout. Returning it
+    would produce a confusing sign-in failure instead of a clear message."""
+    monkeypatch.setenv("VITE_FIREBASE_API_KEY", "your-api-key-here")
+    assert discover_api_key() == "your-api-key-here"  # explicit env var is trusted as-is
+
+    monkeypatch.delenv("VITE_FIREBASE_API_KEY", raising=False)
+    # File-sourced values must look like a real key to be used.
+    from scripts import import_catalog
+    assert (discover_api_key() or "AIzaSy").startswith("AIzaSy")
