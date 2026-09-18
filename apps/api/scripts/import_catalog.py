@@ -265,9 +265,6 @@ def main(argv: list[str] | None = None) -> None:
                         help="Firebase web API key. Usually unnecessary — discovered from "
                              "$VITE_FIREBASE_API_KEY or apps/outlet/.env.local. Public either "
                              "way; it ships in the client bundle.")
-    parser.add_argument("--rate", type=int, default=25,
-                        help="Writes per minute. Default 25, just under the server's "
-                             "30/minute limit (app/rate_limit.py). Lower it if the limit changes.")
     parser.add_argument("--apply", action="store_true",
                         help="Actually write. Without this the run is a dry run and changes nothing.")
     args = parser.parse_args(argv)
