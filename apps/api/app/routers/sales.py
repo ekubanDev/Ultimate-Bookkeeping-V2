@@ -32,7 +32,13 @@ from app.errors import AppError, format_money
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement
 from app.pricing import LineItemInput, compute_sale_totals
 from app.rate_limit import READ_RATE_LIMIT, WRITE_RATE_LIMIT, limiter
-from app.schemas import SaleCreateRequest, SaleListItemResponse, SaleResponse
+from app.schemas import (
+    SaleCreateRequest,
+    SaleDetailResponse,
+    SaleLineItemDetail,
+    SaleListItemResponse,
+    SaleResponse,
+)
 
 router = APIRouter(prefix="/api/v1/sales", tags=["sales"])
 
@@ -353,3 +359,82 @@ async def list_sales(
         )
         for sale in sales
     ]
+
+
+@router.get("/{sale_id}", response_model=SaleDetailResponse)
+@limiter.limit(READ_RATE_LIMIT)
+async def get_sale(
+    request: Request,
+    sale_id: uuid.UUID,
+    outlet_id: uuid.UUID | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> SaleDetailResponse:
+    """One sale with its line items, including the catalog price at the time.
+
+    Built for the price-variance review. `GET /sales?price_variance_flagged=true`
+    answers "which sales look wrong"; only this answers "wrong how" — the
+    submitted price and the catalog price side by side, per line.
+
+    Without it, `catalog_unit_price_at_sale` was written on every line since
+    pricing became server-authoritative and readable through no endpoint at
+    all, so the review Ama's pilot gate depends on could report that
+    something was wrong but never what.
+    """
+    resolved_outlet = await resolve_authorized_outlet(db, current_user, outlet_id)
+
+    result = await db.execute(
+        select(Sale)
+        .where(Sale.id == sale_id, Sale.outlet_id == resolved_outlet.id)
+        .options(selectinload(Sale.line_items))
+    )
+    sale = result.scalar_one_or_none()
+    # Scoped by outlet in the query itself, so another tenant's sale is
+    # indistinguishable from one that does not exist — the same rule
+    # resolve_authorized_outlet applies to outlets (app/authz.py).
+    if sale is None:
+        raise AppError(
+            code="SALE_NOT_FOUND",
+            message=f"Sale {sale_id} not found.",
+            retryable=False,
+            status_code=404,
+        )
+
+    product_ids = [item.product_id for item in sale.line_items]
+    products = {
+        p.id: p
+        for p in (
+            await db.execute(select(Product).where(Product.id.in_(product_ids)))
+        ).scalars().all()
+    }
+
+    return SaleDetailResponse(
+        id=sale.id,
+        client_id=sale.client_id,
+        outlet_id=sale.outlet_id,
+        status=sale.status,
+        payment_method=sale.payment_method,
+        subtotal_amount=format_money(Decimal(sale.subtotal_amount)),
+        discount_amount=format_money(Decimal(sale.discount_amount)),
+        tax_amount=format_money(Decimal(sale.tax_amount)),
+        total_amount=format_money(Decimal(sale.total_amount)),
+        price_variance_flagged=_sale_line_items_flagged(sale),
+        created_at=sale.created_at,
+        device_recorded_at=sale.device_recorded_at,
+        line_items=[
+            SaleLineItemDetail(
+                product_id=item.product_id,
+                # The product may have been renamed since; this is the name
+                # NOW, which is what the reviewer needs to find it in the
+                # catalog. The price pair below is the historical record.
+                product_name=products[item.product_id].name if item.product_id in products else "(deleted)",
+                sku=products[item.product_id].sku if item.product_id in products else None,
+                quantity=item.quantity,
+                unit_price=format_money(Decimal(item.unit_price)),
+                line_total=format_money(Decimal(item.line_total)),
+                catalog_unit_price_at_sale=format_money(Decimal(item.catalog_unit_price_at_sale)),
+                price_variance_flagged=item.price_variance_flagged,
+            )
+            for item in sale.line_items
+        ],
+    )

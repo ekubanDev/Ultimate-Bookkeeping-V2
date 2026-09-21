@@ -333,6 +333,53 @@ class StockLevelResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SaleLineItemDetail(BaseModel):
+    """One line of a sale, including what the catalog said at the time.
+
+    `catalog_unit_price_at_sale` has been written on every line since the
+    server-authoritative pricing change, and was exposed by nothing — so a
+    sale could be FLAGGED for price variance while the variance itself was
+    unreadable through the API. A review queue that can only say "something
+    was wrong here" is not a review queue.
+    """
+
+    product_id: uuid.UUID
+    product_name: str
+    sku: str | None
+    quantity: int
+    # What the device submitted, and therefore what was charged (design.md
+    # §3.7 — persisted verbatim, never repriced).
+    unit_price: str
+    line_total: str
+    # What the catalog held when the sale committed. The pair is the whole
+    # point: neither number means anything on its own.
+    catalog_unit_price_at_sale: str
+    price_variance_flagged: bool
+
+
+class SaleDetailResponse(BaseModel):
+    """GET /api/v1/sales/{id} — one sale with its lines.
+
+    Exists for the price-variance review: the list endpoint reports a
+    boolean per sale, and this is where you find out which product, how
+    much, and against what catalog price.
+    """
+
+    id: uuid.UUID
+    client_id: str
+    outlet_id: uuid.UUID
+    status: str
+    payment_method: str | None
+    subtotal_amount: str
+    discount_amount: str
+    tax_amount: str
+    total_amount: str
+    price_variance_flagged: bool
+    created_at: datetime
+    device_recorded_at: datetime | None
+    line_items: list[SaleLineItemDetail]
+
+
 class ProductCreateRequest(BaseModel):
     """POST /api/v1/products — admin only.
 
