@@ -69,7 +69,39 @@ class User(Base):
 
 
 class Product(Base):
+    """The catalog. `unit_price` here is what the POS displays and what
+    `price_variance_flagged` is computed against (app/pricing.py), so a wrong
+    row does not merely mis-price a sale — it also changes what counts as a
+    suspicious one from then on.
+
+    Two columns and one constraint were added when the write endpoint was
+    built; before that the only way to create a product was seed_dev.py or
+    raw SQL, and the table carried neither a uniqueness guarantee nor any
+    record of who set a price.
+    """
+
     __tablename__ = "products"
+    __table_args__ = (
+        # SKU is the natural key an upsert matches on (see the write endpoint
+        # and seed_dev.py's `_upsert_product_and_stock`), but nothing enforced
+        # it — two rows could share (admin_id, sku) and a SELECT-then-write
+        # upsert would then update an arbitrary one of them. That is the same
+        # unguarded read-modify-write shape that produced the stock oversell
+        # race; here there was not even a constraint to catch it afterwards.
+        #
+        # Partial, because sku is legitimately NULL for an unbarcoded item and
+        # Postgres would otherwise treat every NULL as distinct anyway —
+        # stating it explicitly matches the existing pattern on
+        # stock_movements.client_id and keeps SQLite and Postgres in step.
+        Index(
+            "uq_products_admin_sku",
+            "admin_id",
+            "sku",
+            unique=True,
+            postgresql_where=text("sku IS NOT NULL"),
+            sqlite_where=text("sku IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
     admin_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id"), nullable=False)
@@ -77,7 +109,17 @@ class Product(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     min_stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Attribution. "Who changed this price, and when" is a bookkeeping
+    # question before it is a technical one, and this table could not answer
+    # it: there is no audit_log anywhere in this schema (every other mutable
+    # record carries created_by instead — users, sales, stock_movements,
+    # expenses). Nullable because rows predating the write endpoint, and rows
+    # written by seed_dev.py, have no authenticated actor behind them.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class StockLevel(Base):

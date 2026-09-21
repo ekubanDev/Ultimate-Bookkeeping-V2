@@ -43,6 +43,53 @@ def _is_outlet_authorized(current_user: CurrentUser, outlet: Outlet) -> bool:
     return current_user.outlet_id == outlet.id
 
 
+async def assert_client_id_not_another_tenants(
+    db: AsyncSession,
+    current_user: CurrentUser,
+    owning_outlet_id: uuid.UUID,
+) -> None:
+    """Guard the idempotency-replay path against a cross-tenant client_id hit.
+
+    Every write endpoint looks its `client_id` up FIRST, before resolving or
+    authorizing an outlet (design.md §3.4 step 1 — a replayed intent must
+    never fail differently than it did the first time). That lookup is
+    global: `client_id` is UNIQUE across the whole table, not per outlet.
+
+    So without this check, a `client_id` that already exists under a
+    DIFFERENT tenant is indistinguishable from the caller's own replay, and
+    the handler returns that other tenant's row — leaking its id, amounts and
+    timestamps, AND silently discarding the caller's real write as a
+    "duplicate". The lost write is the worse half: money missing from the
+    books with no error anywhere.
+
+    In practice clients send UUIDv4, so a collision is negligible and
+    guessing one is infeasible. But that safety rests entirely on clients
+    CHOOSING unguessable ids: the schema still accepts any non-empty string
+    (`client_id: str = Field(min_length=1)`), so a modified client can pick
+    "1" deliberately. This check is what makes that harmless — see the note
+    on validating client_id as a UUID in README's known gaps, which would
+    close the remaining cross-tenant denial vector (squatting a short id so
+    another tenant's write is refused).
+
+    Raises 409 CLIENT_ID_CONFLICT rather than returning the row. Deliberately
+    not retryable: replaying the same client_id can never succeed, so the
+    offline queue must surface it for resolution rather than loop.
+    """
+    outlet = await db.get(Outlet, owning_outlet_id)
+    if outlet is not None and _is_outlet_authorized(current_user, outlet):
+        return
+
+    raise AppError(
+        code="CLIENT_ID_CONFLICT",
+        message=(
+            "This client_id is already in use by a different outlet. It cannot be "
+            "replayed here — generate a new client_id for this intent."
+        ),
+        retryable=False,
+        status_code=409,
+    )
+
+
 async def resolve_authorized_outlet(
     db: AsyncSession,
     current_user: CurrentUser,

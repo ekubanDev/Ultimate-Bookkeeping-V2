@@ -40,3 +40,11 @@ __pycache__/
 *-debug.log
 firebase-debug.log
 ui-debug.log
+
+# Catalog / inventory exports. This repository is PUBLIC: a product CSV is a
+# business's supplier pricing and stock position, and committing one
+# publishes it. Keep them outside the repo and pass a path to
+# apps/api/scripts/import_catalog.py.
+catalog*.csv
+inventory*.csv
+*_export*.csv

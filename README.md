@@ -118,7 +118,7 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 cd apps/api && pytest                       # 137 + 7 skipped, SQLite, no setup needed
 DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 143 + 1 skipped
 
-npm run test:outlet          # 187
+npm run test:outlet          # 192
 npm run test:offline-queue   # 46
 npm run test:api-client      # 10
 npm run build:outlet
@@ -141,7 +141,7 @@ requests at the driver, so the lost-update race those tests cover cannot
 occur there and a pass would prove nothing.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
-forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 187
+forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 192
 whether or not you followed the `cp .env.example .env.local` step above.
 Don't remove that override — without it, the tests asserting the Firebase
 SDK is never loaded when unconfigured will instead initialize it for real.
@@ -157,6 +157,15 @@ SDK is never loaded when unconfigured will instead initialize it for real.
   is untested — only the emulator path and the credential-less fail-closed
   path have been verified.
 - **Windows** is unverified; everything above was run on Linux.
+- **`client_id` is not validated as a UUID.** The schema accepts any
+  non-empty string (`client_id: str = Field(min_length=1)`), while
+  uniqueness is enforced GLOBALLY — one namespace shared by every tenant.
+  `app/authz.py`'s `assert_client_id_not_another_tenants` makes a collision
+  safe (409 rather than leaking or discarding a write), but a modified
+  client can still squat a short id so another tenant's write is refused.
+  Validating it as a UUID closes that; it costs updating ~60 readable test
+  fixtures (`"adj-1"`, `"client-half-up-boundary"`), which is why it was
+  costed separately rather than bundled in.
 - **The deploy pipeline is still being shaken out.** The image builds and
   pushes, and the migration job runs, but no end-to-end deploy has yet
   succeeded. Treat a deploy as an experiment, not a routine, until one has.

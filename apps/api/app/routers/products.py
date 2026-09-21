@@ -28,17 +28,18 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
 from app.authz import resolve_authorized_outlet
 from app.db import get_db
-from app.errors import format_money
+from app.errors import AppError, format_money
 from app.models import Product
-from app.rate_limit import READ_RATE_LIMIT, limiter
-from app.schemas import ProductResponse
+from app.rate_limit import READ_RATE_LIMIT, WRITE_RATE_LIMIT, limiter
+from app.schemas import ProductCreateRequest, ProductResponse, ProductUpdateRequest
 
 router = APIRouter(prefix="/api/v1/products", tags=["products"])
 
@@ -75,3 +76,124 @@ async def list_products(
         )
         for product in products
     ]
+
+
+def _require_admin(current_user: CurrentUser) -> None:
+    """Catalog writes are admin-only.
+
+    Products belong to an admin (products.admin_id), not to an outlet — one
+    catalog is shared across every outlet that admin owns, so an outlet
+    manager editing a price would silently reprice their colleagues' shops
+    too. CLAUDE.md's scope boundary says the same thing from the other
+    direction: catalog management is admin territory.
+
+    403, not 404: unlike the cross-tenant case, there is nothing to hide
+    here. A manager knows products exist — they sell them all day. Collapsing
+    this to 404 would obscure a permission answer without protecting
+    anything.
+    """
+    if current_user.role != "admin":
+        raise AppError(
+            code="FORBIDDEN",
+            message="Only an admin can change the product catalog.",
+            retryable=False,
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
+
+
+def _to_response(product: Product) -> ProductResponse:
+    return ProductResponse(
+        id=product.id,
+        sku=product.sku,
+        name=product.name,
+        unit_price=format_money(Decimal(product.unit_price)),
+        min_stock=product.min_stock,
+    )
+
+
+@router.post("", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(WRITE_RATE_LIMIT)
+async def create_product(
+    request: Request,
+    payload: ProductCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ProductResponse:
+    _require_admin(current_user)
+    outlet = await resolve_authorized_outlet(db, current_user, payload.outlet_id)
+
+    product = Product(
+        id=uuid.uuid4(),
+        admin_id=outlet.admin_id,
+        sku=payload.sku,
+        name=payload.name,
+        unit_price=payload.unit_price_decimal,
+        min_stock=payload.min_stock,
+        created_by=current_user.id,
+    )
+    db.add(product)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        # uq_products_admin_sku — this tenant already has a product with this
+        # SKU. Deliberately NOT an upsert: silently rewriting an existing
+        # product's name and price because the SKU matched is how a catalog
+        # import quietly changes what the till charges. The caller is told,
+        # and PATCHes if replacing the row is what they meant.
+        await db.rollback()
+        raise AppError(
+            code="PRODUCT_SKU_EXISTS",
+            message=f"A product with SKU {payload.sku!r} already exists in this catalog.",
+            retryable=False,
+            status_code=status.HTTP_409_CONFLICT,
+        ) from None
+
+    await db.refresh(product)
+    return _to_response(product)
+
+
+@router.patch("/{product_id}", response_model=ProductResponse)
+@limiter.limit(WRITE_RATE_LIMIT)
+async def update_product(
+    request: Request,
+    product_id: uuid.UUID,
+    payload: ProductUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ProductResponse:
+    _require_admin(current_user)
+    outlet = await resolve_authorized_outlet(db, current_user, payload.outlet_id)
+
+    product = await db.get(Product, product_id)
+    # Tenant check on the ROW, not just the outlet: a valid admin naming their
+    # own outlet must still not be able to edit another tenant's product by id.
+    # Same 404-for-both-causes rule as resolve_authorized_outlet, so a missing
+    # product and someone else's product are indistinguishable.
+    if product is None or product.admin_id != outlet.admin_id:
+        raise AppError(
+            code="PRODUCT_NOT_FOUND",
+            message=f"Product {product_id} not found in this catalog.",
+            retryable=False,
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    fields = payload.model_dump(exclude_unset=True, exclude={"outlet_id", "unit_price"})
+    for key, value in fields.items():
+        setattr(product, key, value)
+    if payload.unit_price is not None:
+        product.unit_price = payload.unit_price_decimal
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise AppError(
+            code="PRODUCT_SKU_EXISTS",
+            message=f"A product with SKU {payload.sku!r} already exists in this catalog.",
+            retryable=False,
+            status_code=status.HTTP_409_CONFLICT,
+        ) from None
+
+    await db.refresh(product)
+    return _to_response(product)
