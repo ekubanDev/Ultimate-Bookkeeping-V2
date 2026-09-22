@@ -49,9 +49,11 @@ import asyncio
 import os
 
 import pytest
+
 from sqlalchemy import func, select
 
 from app.models import Expense, Sale, StockLevel, StockMovement
+from tests.conftest import cid
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"),
@@ -62,7 +64,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-SAME_CLIENT_ID = "race-same-client-id-0001"
+SAME_CLIENT_ID = cid("race-same-client-id-0001")
 
 
 def _sale_payload(seed, *, client_id: str, quantity: int = 2) -> dict:

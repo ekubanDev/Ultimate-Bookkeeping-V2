@@ -31,8 +31,9 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.models import Expense, Outlet, Product, Sale, StockLevel, StockMovement, User
+from tests.conftest import cid
 
-SHARED_CLIENT_ID = "collision-across-tenants"
+SHARED_CLIENT_ID = cid("collision-across-tenants")
 
 
 async def _create_other_tenant_sale(client, *, client_id: str) -> dict:
@@ -129,7 +130,7 @@ async def test_the_refusal_is_not_retryable(client):
 
 async def test_own_replay_still_works(client):
     """The guard must not break the legitimate case it sits in front of."""
-    payload = _sale_payload(client.seed, client_id="my-own-client-id")
+    payload = _sale_payload(client.seed, client_id=cid("my-own-client-id"))
 
     first = await client.post("/api/v1/sales", json=payload)
     second = await client.post("/api/v1/sales", json=payload)
@@ -141,13 +142,13 @@ async def test_own_replay_still_works(client):
 
 
 async def test_expense_with_another_tenants_client_id_is_refused(client):
-    other = await _create_other_tenant_sale(client, client_id="other-expense-cid")
+    other = await _create_other_tenant_sale(client, client_id=cid("other-expense-cid"))
     async with client.session_factory() as session:
         session.add(
             Expense(
                 id=uuid.uuid4(),
                 outlet_id=other["outlet_id"],
-                client_id="expense-collision",
+                client_id=cid("expense-collision"),
                 amount=Decimal("500.00"),
                 category="rent",
             )
@@ -157,7 +158,7 @@ async def test_expense_with_another_tenants_client_id_is_refused(client):
     resp = await client.post(
         "/api/v1/expenses",
         json={
-            "client_id": "expense-collision",
+            "client_id": cid("expense-collision"),
             "outlet_id": str(client.seed["outlet_id"]),
             "amount": "50.00",
             "category": "utilities",
@@ -172,7 +173,7 @@ async def test_expense_with_another_tenants_client_id_is_refused(client):
 
 
 async def test_stock_adjustment_with_another_tenants_client_id_is_refused(client):
-    other = await _create_other_tenant_sale(client, client_id="other-adj-cid")
+    other = await _create_other_tenant_sale(client, client_id=cid("other-adj-cid"))
     async with client.session_factory() as session:
         session.add(
             StockMovement(
@@ -181,7 +182,7 @@ async def test_stock_adjustment_with_another_tenants_client_id_is_refused(client
                 outlet_id=other["outlet_id"],
                 delta=-5,
                 reason="adjustment",
-                client_id="adjustment-collision",
+                client_id=cid("adjustment-collision"),
             )
         )
         await session.commit()
@@ -189,7 +190,7 @@ async def test_stock_adjustment_with_another_tenants_client_id_is_refused(client
     resp = await client.post(
         "/api/v1/stock/adjustments",
         json={
-            "client_id": "adjustment-collision",
+            "client_id": cid("adjustment-collision"),
             "product_id": str(client.seed["product_id"]),
             "outlet_id": str(client.seed["outlet_id"]),
             "delta": -1,
@@ -230,6 +231,6 @@ async def test_the_callers_own_write_is_not_silently_discarded(client):
 
     # And the refusal is recoverable: a new client_id goes through.
     retry = await client.post(
-        "/api/v1/sales", json=_sale_payload(client.seed, client_id="a-fresh-client-id")
+        "/api/v1/sales", json=_sale_payload(client.seed, client_id=cid("a-fresh-client-id"))
     )
     assert retry.status_code == 201, retry.text

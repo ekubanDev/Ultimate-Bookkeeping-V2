@@ -9,6 +9,8 @@ real WRITE_RATE_LIMIT constant — then restores the disabled default.
 """
 from __future__ import annotations
 
+from tests.conftest import cid
+
 import pytest_asyncio
 
 from app.rate_limit import WRITE_RATE_LIMIT, limiter, rate_limit_key
@@ -56,7 +58,7 @@ async def test_burst_past_write_limit_returns_429_retryable_envelope(rate_limite
         resp = await client.post(
             "/api/v1/expenses",
             json={
-                "client_id": f"rl-burst-{i}",
+                "client_id": cid(f"rl-burst-{i}"),
                 "outlet_id": str(seed["outlet_id"]),
                 "amount": "1.00",
                 "category": "test",

@@ -6,12 +6,13 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.models import Product, Sale, SaleLineItem, StockLevel, StockMovement, User
+from tests.conftest import cid
 
 
 def _sale_payload(
     seed,
     *,
-    client_id="client-1",
+    client_id=cid("client-1"),
     quantity=2,
     unit_price="15.00",
     tax="3.00",
@@ -79,7 +80,7 @@ async def test_happy_path_creates_sale_and_decrements_stock(client):
     assert body["tax_amount"] == "3.00"
     assert body["total_amount"] == "33.00"  # 30.00 - 0.00 + 3.00
     assert body["price_variance_flagged"] is False  # submitted price matches catalog exactly
-    assert body["client_id"] == "client-1"
+    assert body["client_id"] == cid("client-1")
     assert body["idempotent_replay"] is False
     assert "id" in body and "created_at" in body
 
@@ -87,7 +88,7 @@ async def test_happy_path_creates_sale_and_decrements_stock(client):
     assert await _stock_qty(client, seed["product_id"], seed["outlet_id"]) == 8
 
     async with client.session_factory() as session:
-        sale = (await session.execute(select(Sale).where(Sale.client_id == "client-1"))).scalar_one()
+        sale = (await session.execute(select(Sale).where(Sale.client_id == cid("client-1")))).scalar_one()
         line_items = (
             (await session.execute(select(SaleLineItem).where(SaleLineItem.sale_id == sale.id)))
             .scalars()
@@ -110,12 +111,12 @@ async def test_happy_path_creates_sale_and_decrements_stock(client):
     assert len(movements) == 1
     assert movements[0].delta == -2
     assert movements[0].reason == "sale"
-    assert movements[0].client_id == "client-1"
+    assert movements[0].client_id == cid("client-1")
 
 
 async def test_idempotent_replay_does_not_double_decrement(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-replay")
+    payload = _sale_payload(seed, client_id=cid("client-replay"))
 
     first = await client.post("/api/v1/sales", json=payload)
     assert first.status_code == 201
@@ -137,7 +138,7 @@ async def test_idempotent_replay_does_not_double_decrement(client):
 
     async with client.session_factory() as session:
         sales = (
-            (await session.execute(select(Sale).where(Sale.client_id == "client-replay")))
+            (await session.execute(select(Sale).where(Sale.client_id == cid("client-replay"))))
             .scalars()
             .all()
         )
@@ -187,10 +188,10 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
         )
         await session.commit()
 
-    cross_tenant_payload = _sale_payload(seed, client_id="client-cross-tenant-product")
+    cross_tenant_payload = _sale_payload(seed, client_id=cid("client-cross-tenant-product"))
     cross_tenant_payload["line_items"][0]["product_id"] = str(other_product_id)
 
-    nonexistent_payload = _sale_payload(seed, client_id="client-nonexistent-product")
+    nonexistent_payload = _sale_payload(seed, client_id=cid("client-nonexistent-product"))
     nonexistent_payload["line_items"][0]["product_id"] = "00000000-0000-0000-0000-000000000000"
 
     cross_tenant_resp = await client.post("/api/v1/sales", json=cross_tenant_payload)
@@ -207,7 +208,7 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
 
 async def test_insufficient_stock_rolls_back_no_partial_rows(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-oversell", quantity=999)
+    payload = _sale_payload(seed, client_id=cid("client-oversell"), quantity=999)
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -222,12 +223,12 @@ async def test_insufficient_stock_rolls_back_no_partial_rows(client):
     # No partial rows anywhere.
     async with client.session_factory() as session:
         sales = (
-            (await session.execute(select(Sale).where(Sale.client_id == "client-oversell")))
+            (await session.execute(select(Sale).where(Sale.client_id == cid("client-oversell"))))
             .scalars()
             .all()
         )
         movements = (
-            (await session.execute(select(StockMovement).where(StockMovement.client_id == "client-oversell")))
+            (await session.execute(select(StockMovement).where(StockMovement.client_id == cid("client-oversell"))))
             .scalars()
             .all()
         )
@@ -237,7 +238,7 @@ async def test_insufficient_stock_rolls_back_no_partial_rows(client):
 
 async def test_rejects_float_money(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-float")
+    payload = _sale_payload(seed, client_id=cid("client-float"))
     payload["line_items"][0]["submitted_unit_price"] = 15.0  # float, not a string
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -248,7 +249,7 @@ async def test_rejects_float_money(client):
 
 async def test_rejects_three_decimal_places(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-3dp", unit_price="15.005")
+    payload = _sale_payload(seed, client_id=cid("client-3dp"), unit_price="15.005")
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -269,7 +270,7 @@ async def test_rejects_empty_line_items(client):
 
 async def test_rejects_non_positive_quantity(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-badqty", quantity=0)
+    payload = _sale_payload(seed, client_id=cid("client-badqty"), quantity=0)
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -298,7 +299,7 @@ async def test_percentage_discount_rounds_once_not_per_line(client):
     2.010 -> 2.01) — these two approaches must diverge here, proving the
     implementation rounds once, not per line."""
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-round-once", discount_type="percentage", discount_value="0.00")
+    payload = _sale_payload(seed, client_id=cid("client-round-once"), discount_type="percentage", discount_value="0.00")
     payload["discount_type"] = "percentage"
     payload["discount_value"] = "10.00"
     payload["tax_amount"] = "0.00"
@@ -323,7 +324,7 @@ async def test_percentage_discount_round_half_up_on_exact_boundary(client):
     seed = client.seed
     payload = _sale_payload(
         seed,
-        client_id="client-half-up-boundary",
+        client_id=cid("client-half-up-boundary"),
         quantity=10,
         unit_price="15.00",  # matches catalog exactly -> no variance noise
         discount_type="percentage",
@@ -342,7 +343,7 @@ async def test_percentage_discount_round_half_up_on_exact_boundary(client):
 
 async def test_percentage_discount_outside_range_rejected(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-pct-oor", discount_type="percentage", discount_value="100.01")
+    payload = _sale_payload(seed, client_id=cid("client-pct-oor"), discount_type="percentage", discount_value="100.01")
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -357,7 +358,7 @@ async def test_fixed_discount_clamped_to_subtotal(client):
     seed = client.seed
     payload = _sale_payload(
         seed,
-        client_id="client-fixed-clamp",
+        client_id=cid("client-fixed-clamp"),
         quantity=1,
         unit_price="15.00",
         discount_type="fixed",
@@ -378,7 +379,7 @@ async def test_total_amount_floored_at_zero(client):
     seed = client.seed
     payload = _sale_payload(
         seed,
-        client_id="client-floor-zero",
+        client_id=cid("client-floor-zero"),
         quantity=1,
         unit_price="15.00",
         discount_type="fixed",
@@ -398,7 +399,7 @@ async def test_client_supplied_totals_are_ignored(client):
     even if the client sends garbage values in the body, the response
     always reflects server computation."""
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-ignore-totals", quantity=2, unit_price="15.00", tax="3.00")
+    payload = _sale_payload(seed, client_id=cid("client-ignore-totals"), quantity=2, unit_price="15.00", tax="3.00")
     payload["subtotal_amount"] = "1.00"
     payload["discount_amount"] = "1.00"
     payload["total_amount"] = "1.00"
@@ -418,7 +419,7 @@ async def test_unit_price_persisted_verbatim_even_when_it_differs_from_catalog(c
     alongside for audit."""
     seed = client.seed
     payload = _sale_payload(
-        seed, client_id="client-verbatim-price", quantity=1, unit_price="20.00"  # catalog is 15.00
+        seed, client_id=cid("client-verbatim-price"), quantity=1, unit_price="20.00"  # catalog is 15.00
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -428,7 +429,7 @@ async def test_unit_price_persisted_verbatim_even_when_it_differs_from_catalog(c
     assert body["price_variance_flagged"] is True
 
     async with client.session_factory() as session:
-        sale = (await session.execute(select(Sale).where(Sale.client_id == "client-verbatim-price"))).scalar_one()
+        sale = (await session.execute(select(Sale).where(Sale.client_id == cid("client-verbatim-price")))).scalar_one()
         line_item = (
             await session.execute(select(SaleLineItem).where(SaleLineItem.sale_id == sale.id))
         ).scalar_one()
@@ -446,7 +447,7 @@ async def test_price_variance_not_flagged_within_cheap_item_floor(client):
     seed = client.seed
     product_id = await _add_product(client, seed, unit_price=Decimal("3.00"))
     payload = _sale_payload(
-        seed, client_id="client-cheap-no-flag", quantity=1, unit_price="3.06", product_id=product_id
+        seed, client_id=cid("client-cheap-no-flag"), quantity=1, unit_price="3.06", product_id=product_id
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -463,7 +464,7 @@ async def test_price_variance_flagged_above_expensive_item_two_percent_and_sale_
     seed = client.seed
     product_id = await _add_product(client, seed, unit_price=Decimal("300.00"), quantity=5)
     payload = _sale_payload(
-        seed, client_id="client-expensive-flag", quantity=1, unit_price="310.00", product_id=product_id
+        seed, client_id=cid("client-expensive-flag"), quantity=1, unit_price="310.00", product_id=product_id
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -476,7 +477,7 @@ async def test_price_variance_flagged_above_expensive_item_two_percent_and_sale_
     assert await _stock_qty(client, product_id, seed["outlet_id"]) == 4
 
     async with client.session_factory() as session:
-        sale = (await session.execute(select(Sale).where(Sale.client_id == "client-expensive-flag"))).scalar_one()
+        sale = (await session.execute(select(Sale).where(Sale.client_id == cid("client-expensive-flag")))).scalar_one()
         line_item = (
             await session.execute(select(SaleLineItem).where(SaleLineItem.sale_id == sale.id))
         ).scalar_one()
@@ -488,10 +489,10 @@ async def test_price_variance_flagged_above_expensive_item_two_percent_and_sale_
 
 async def test_get_sales_price_variance_flagged_filter(client):
     seed = client.seed
-    clean_payload = _sale_payload(seed, client_id="client-list-clean", quantity=1, unit_price="15.00")
+    clean_payload = _sale_payload(seed, client_id=cid("client-list-clean"), quantity=1, unit_price="15.00")
     flagged_product_id = await _add_product(client, seed, unit_price=Decimal("300.00"))
     flagged_payload = _sale_payload(
-        seed, client_id="client-list-flagged", quantity=1, unit_price="310.00", product_id=flagged_product_id
+        seed, client_id=cid("client-list-flagged"), quantity=1, unit_price="310.00", product_id=flagged_product_id
     )
 
     assert (await client.post("/api/v1/sales", json=clean_payload)).status_code == 201
@@ -499,14 +500,14 @@ async def test_get_sales_price_variance_flagged_filter(client):
 
     all_resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
     assert all_resp.status_code == 200, all_resp.text
-    assert {row["client_id"] for row in all_resp.json()} == {"client-list-clean", "client-list-flagged"}
+    assert {row["client_id"] for row in all_resp.json()} == {cid("client-list-clean"), cid("client-list-flagged")}
 
     flagged_resp = await client.get(
         "/api/v1/sales", params={"outlet_id": str(seed["outlet_id"]), "price_variance_flagged": "true"}
     )
     assert flagged_resp.status_code == 200, flagged_resp.text
     flagged_body = flagged_resp.json()
-    assert [row["client_id"] for row in flagged_body] == ["client-list-flagged"]
+    assert [row["client_id"] for row in flagged_body] == [cid("client-list-flagged")]
     assert flagged_body[0]["price_variance_flagged"] is True
 
     unflagged_resp = await client.get(
@@ -514,7 +515,7 @@ async def test_get_sales_price_variance_flagged_filter(client):
     )
     assert unflagged_resp.status_code == 200, unflagged_resp.text
     unflagged_body = unflagged_resp.json()
-    assert [row["client_id"] for row in unflagged_body] == ["client-list-clean"]
+    assert [row["client_id"] for row in unflagged_body] == [cid("client-list-clean")]
     assert unflagged_body[0]["price_variance_flagged"] is False
 
 
@@ -564,27 +565,27 @@ async def _insert_sale_directly(
 async def test_get_sales_default_order_is_descending_newest_first(client):
     seed = client.seed
     base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    await _insert_sale_directly(client, seed, client_id="order-oldest", created_at=base)
-    await _insert_sale_directly(client, seed, client_id="order-middle", created_at=base + timedelta(minutes=1))
-    await _insert_sale_directly(client, seed, client_id="order-newest", created_at=base + timedelta(minutes=2))
+    await _insert_sale_directly(client, seed, client_id=cid("order-oldest"), created_at=base)
+    await _insert_sale_directly(client, seed, client_id=cid("order-middle"), created_at=base + timedelta(minutes=1))
+    await _insert_sale_directly(client, seed, client_id=cid("order-newest"), created_at=base + timedelta(minutes=2))
 
     resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
 
     assert resp.status_code == 200, resp.text
-    assert [row["client_id"] for row in resp.json()] == ["order-newest", "order-middle", "order-oldest"]
+    assert [row["client_id"] for row in resp.json()] == [cid("order-newest"), cid("order-middle"), cid("order-oldest")]
 
 
 async def test_get_sales_order_asc_param_is_chronological(client):
     seed = client.seed
     base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    await _insert_sale_directly(client, seed, client_id="order-oldest", created_at=base)
-    await _insert_sale_directly(client, seed, client_id="order-middle", created_at=base + timedelta(minutes=1))
-    await _insert_sale_directly(client, seed, client_id="order-newest", created_at=base + timedelta(minutes=2))
+    await _insert_sale_directly(client, seed, client_id=cid("order-oldest"), created_at=base)
+    await _insert_sale_directly(client, seed, client_id=cid("order-middle"), created_at=base + timedelta(minutes=1))
+    await _insert_sale_directly(client, seed, client_id=cid("order-newest"), created_at=base + timedelta(minutes=2))
 
     resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"]), "order": "asc"})
 
     assert resp.status_code == 200, resp.text
-    assert [row["client_id"] for row in resp.json()] == ["order-oldest", "order-middle", "order-newest"]
+    assert [row["client_id"] for row in resp.json()] == [cid("order-oldest"), cid("order-middle"), cid("order-newest")]
 
 
 async def test_get_sales_invalid_order_param_is_422(client):
@@ -673,7 +674,7 @@ async def test_outlet_manager_cannot_read_another_outlets_sales(client):
     seed = client.seed
     other_outlet_id = uuid.uuid4()
     create_resp = await client.post(
-        "/api/v1/sales", json=_sale_payload(seed, client_id="own-outlet-sale")
+        "/api/v1/sales", json=_sale_payload(seed, client_id=cid("own-outlet-sale"))
     )
     assert create_resp.status_code == 201, create_resp.text
 
@@ -682,7 +683,7 @@ async def test_outlet_manager_cannot_read_another_outlets_sales(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body) == 1
-    assert body[0]["client_id"] == "own-outlet-sale"
+    assert body[0]["client_id"] == cid("own-outlet-sale")
     assert body[0]["outlet_id"] == str(seed["outlet_id"])
 
 
@@ -727,21 +728,21 @@ async def test_outlet_manager_scoping_holds_with_price_variance_filter_and_order
     base = datetime(2026, 3, 1, 9, 0, 0, tzinfo=timezone.utc)
 
     await _insert_sale_with_flag_directly(
-        client, seed, client_id="scope-clean", created_at=base, price_variance_flagged=False
+        client, seed, client_id=cid("scope-clean"), created_at=base, price_variance_flagged=False
     )
     await _insert_sale_with_flag_directly(
         client,
         seed,
-        client_id="scope-flagged",
+        client_id=cid("scope-flagged"),
         created_at=base + timedelta(minutes=1),
         price_variance_flagged=True,
     )
 
     for flagged_param, order_param, expected_client_ids in (
-        (None, "desc", ["scope-flagged", "scope-clean"]),
-        (None, "asc", ["scope-clean", "scope-flagged"]),
-        (True, "desc", ["scope-flagged"]),
-        (False, "desc", ["scope-clean"]),
+        (None, "desc", [cid("scope-flagged"), cid("scope-clean")]),
+        (None, "asc", [cid("scope-clean"), cid("scope-flagged")]),
+        (True, "desc", [cid("scope-flagged")]),
+        (False, "desc", [cid("scope-clean")]),
     ):
         params = {"outlet_id": str(other_outlet_id), "order": order_param}
         if flagged_param is not None:
@@ -769,7 +770,7 @@ async def test_outlet_manager_scoping_holds_with_price_variance_filter_and_order
 
 async def test_rejects_quantity_above_ceiling(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-qty-ceiling")
+    payload = _sale_payload(seed, client_id=cid("client-qty-ceiling"))
     payload["line_items"][0]["quantity"] = 10_001  # MAX_QUANTITY_PER_LINE_ITEM + 1
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -787,7 +788,7 @@ async def test_accepts_quantity_at_ceiling(client):
     seed = client.seed
     product_id = await _add_product(client, seed, unit_price=Decimal("0.01"), quantity=10_000)
     payload = _sale_payload(
-        seed, client_id="client-qty-at-ceiling", unit_price="0.01", product_id=product_id
+        seed, client_id=cid("client-qty-at-ceiling"), unit_price="0.01", product_id=product_id
     )
     payload["line_items"][0]["quantity"] = 10_000  # MAX_QUANTITY_PER_LINE_ITEM
 
@@ -801,7 +802,7 @@ async def test_rejects_line_items_above_ceiling(client):
     # 101 line items for the same product (MAX_LINE_ITEMS_PER_SALE=100 + 1)
     # — content doesn't matter, only the count; rejected by Pydantic's
     # `max_length` before any DB/catalog lookup happens.
-    payload = _sale_payload(seed, client_id="client-lineitems-ceiling")
+    payload = _sale_payload(seed, client_id=cid("client-lineitems-ceiling"))
     payload["line_items"] = [
         {"product_id": str(seed["product_id"]), "quantity": 1, "submitted_unit_price": "15.00"}
         for _ in range(101)
@@ -833,7 +834,7 @@ async def test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db(client):
 
     payload = _sale_payload(
         seed,
-        client_id="client-numeric-ceiling",
+        client_id=cid("client-numeric-ceiling"),
         quantity=1,
         unit_price=ceiling_price,
         tax="0.00",
@@ -850,7 +851,7 @@ async def test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db(client):
 
     list_resp = await client.get("/api/v1/sales", params={"outlet_id": str(seed["outlet_id"])})
     assert list_resp.status_code == 200, list_resp.text
-    listed = next(row for row in list_resp.json() if row["client_id"] == "client-numeric-ceiling")
+    listed = next(row for row in list_resp.json() if row["client_id"] == cid("client-numeric-ceiling"))
     assert listed["total_amount"] == ceiling_price
 
 
@@ -870,7 +871,7 @@ OVER_CEILING = "10000000000.00"  # one pesewa's worth of "1" past the ceiling
 
 async def test_rejects_submitted_unit_price_above_ceiling(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-unitprice-over", quantity=1, unit_price=OVER_CEILING)
+    payload = _sale_payload(seed, client_id=cid("client-unitprice-over"), quantity=1, unit_price=OVER_CEILING)
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -880,7 +881,7 @@ async def test_rejects_submitted_unit_price_above_ceiling(client):
 
 async def test_rejects_tax_amount_above_ceiling(client):
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-tax-over", tax=OVER_CEILING)
+    payload = _sale_payload(seed, client_id=cid("client-tax-over"), tax=OVER_CEILING)
 
     resp = await client.post("/api/v1/sales", json=payload)
 
@@ -893,7 +894,7 @@ async def test_rejects_fixed_discount_value_above_ceiling(client):
     percentage — it must be bounded the same as every other money field."""
     seed = client.seed
     payload = _sale_payload(
-        seed, client_id="client-discount-fixed-over", discount_type="fixed", discount_value=OVER_CEILING
+        seed, client_id=cid("client-discount-fixed-over"), discount_type="fixed", discount_value=OVER_CEILING
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -909,7 +910,7 @@ async def test_percentage_discount_value_still_accepted_up_to_100(client):
     interfere with the tighter, percentage-specific 0-100 check."""
     seed = client.seed
     payload = _sale_payload(
-        seed, client_id="client-discount-pct-100", discount_type="percentage", discount_value="100.00"
+        seed, client_id=cid("client-discount-pct-100"), discount_type="percentage", discount_value="100.00"
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -922,7 +923,7 @@ async def test_percentage_discount_value_above_100_still_rejected_by_its_own_che
     — the pre-existing percentage-specific check still does its job."""
     seed = client.seed
     payload = _sale_payload(
-        seed, client_id="client-discount-pct-over100", discount_type="percentage", discount_value="100.01"
+        seed, client_id=cid("client-discount-pct-over100"), discount_type="percentage", discount_value="100.01"
     )
 
     resp = await client.post("/api/v1/sales", json=payload)
@@ -940,7 +941,7 @@ async def test_accepts_submitted_unit_price_at_exact_ceiling_schema_layer(client
     product_id = await _add_product(client, seed, unit_price=Decimal(MONEY_CEILING), quantity=1)
     payload = _sale_payload(
         seed,
-        client_id="client-unitprice-at-ceiling",
+        client_id=cid("client-unitprice-at-ceiling"),
         quantity=1,
         unit_price=MONEY_CEILING,
         tax="0.00",
@@ -963,7 +964,7 @@ async def test_rejects_aggregate_subtotal_overflow_from_many_valid_line_items(cl
     (NUMERIC(12,2)) can hold. Rejected before any DB/catalog/stock lookup
     (pydantic model validation), so no seeded stock is needed."""
     seed = client.seed
-    payload = _sale_payload(seed, client_id="client-aggregate-overflow")
+    payload = _sale_payload(seed, client_id=cid("client-aggregate-overflow"))
     payload["line_items"] = [
         {"product_id": str(seed["product_id"]), "quantity": 10_000, "submitted_unit_price": "500000.00"}
         for _ in range(100)
@@ -985,7 +986,7 @@ async def test_rejects_aggregate_total_overflow_from_subtotal_plus_tax(client):
     seed = client.seed
     payload = _sale_payload(
         seed,
-        client_id="client-total-overflow",
+        client_id=cid("client-total-overflow"),
         quantity=1,
         unit_price=MONEY_CEILING,
         tax="1.00",
