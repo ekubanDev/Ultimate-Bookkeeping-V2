@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 214 + 3 skipped, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 216 + 1 skipped
+cd apps/api && pytest                       # 228 + 7 skipped, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 234 + 1 skipped
 
 npm run test:outlet          # 192
 npm run test:offline-queue   # 46
@@ -132,13 +132,14 @@ That same FK enforcement is why the Postgres run reports one skip:
 `test_outlet_manager_with_dangling_outlet_id_gets_outlet_not_found` models a
 `users.outlet_id` pointing at a deleted outlet, which SQLite stores happily
 and Postgres physically refuses. The skip is deliberate and explained at the
-`skipif` in `tests/test_authz.py` — a Postgres run of 127 passed / 1 skipped
+`skipif` in `tests/test_authz.py` — a Postgres run of 234 passed / 1 skipped
 is the expected green result, not a masked failure.
 
 The skips run the other way too: `tests/test_stock_concurrency.py` (3 tests)
-is Postgres-only. SQLite's shared in-memory connection serializes concurrent
-requests at the driver, so the lost-update race those tests cover cannot
-occur there and a pass would prove nothing.
+and `tests/test_idempotency_race.py` (4 tests) are Postgres-only — hence 7
+skips on SQLite and 1 on Postgres, 235 collected either way. SQLite's shared
+in-memory connection serializes concurrent requests at the driver, so the
+races those tests cover cannot occur there and a pass would prove nothing.
 
 The JS suites are hermetic with respect to `.env.local`: `vitest.config.js`
 forces `VITE_FIREBASE_*` blank, so `npm run test:outlet` gives the same 192
@@ -153,22 +154,16 @@ SDK is never loaded when unconfigured will instead initialize it for real.
 - **No service worker in `npm run dev`.** Offline behaviour and caching only
   exist in a production build (`npm run build:outlet` + `vite preview`).
 - **PWA icons are placeholders** pending real brand assets.
-- **A real Firebase project** (service-account key, `GOOGLE_APPLICATION_CREDENTIALS`)
-  is untested — only the emulator path and the credential-less fail-closed
-  path have been verified.
+- **Firebase Auth runs against the real project** in production, with no
+  service-account key anywhere: the deployed API verifies ID tokens using its
+  runtime service account's `roles/firebaseauth.admin`, and CI authenticates
+  by Workload Identity Federation. `GOOGLE_APPLICATION_CREDENTIALS` is not
+  set in any deployed environment. If adding a key file ever seems necessary,
+  that is the signal to fix the identity instead.
 - **Windows** is unverified; everything above was run on Linux.
-- **`client_id` is not validated as a UUID.** The schema accepts any
-  non-empty string (`client_id: str = Field(min_length=1)`), while
-  uniqueness is enforced GLOBALLY — one namespace shared by every tenant.
-  `app/authz.py`'s `assert_client_id_not_another_tenants` makes a collision
-  safe (409 rather than leaking or discarding a write), but a modified
-  client can still squat a short id so another tenant's write is refused.
-  Validating it as a UUID closes that; it costs updating ~60 readable test
-  fixtures (`"adj-1"`, `"client-half-up-boundary"`), which is why it was
-  costed separately rather than bundled in.
-- **The deploy pipeline is still being shaken out.** The image builds and
-  pushes, and the migration job runs, but no end-to-end deploy has yet
-  succeeded. Treat a deploy as an experiment, not a routine, until one has.
+- **Restoring a backup has never been tested.** Nightly backups run with 7
+  retained and 7-day PITR, but no restore has been performed, so the recovery
+  time is unmeasured. Don't quote an RTO you haven't measured.
 
 ---
 

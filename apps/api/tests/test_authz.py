@@ -15,6 +15,8 @@ from decimal import Decimal
 
 import pytest
 
+from tests.conftest import cid
+
 from app.models import Outlet, Product, User
 
 
@@ -104,7 +106,7 @@ async def test_admin_cannot_write_another_tenants_stock_adjustment(admin_client)
     resp = await admin_client.post(
         "/api/v1/stock/adjustments",
         json={
-            "client_id": "cross-tenant-adj",
+            "client_id": cid("cross-tenant-adj"),
             "product_id": str(other["product_id"]),
             "outlet_id": str(other["outlet_id"]),
             "delta": 5,
@@ -126,7 +128,7 @@ async def test_admin_happy_path_writes_own_outlet_adjustment(admin_client):
     resp = await admin_client.post(
         "/api/v1/stock/adjustments",
         json={
-            "client_id": "own-outlet-adj",
+            "client_id": cid("own-outlet-adj"),
             "product_id": str(seed["product_id"]),
             "outlet_id": str(seed["outlet_id"]),
             "delta": 5,
@@ -145,7 +147,7 @@ async def test_admin_cannot_write_another_tenants_sale(admin_client):
     resp = await admin_client.post(
         "/api/v1/sales",
         json={
-            "client_id": "cross-tenant-sale",
+            "client_id": cid("cross-tenant-sale"),
             "outlet_id": str(other["outlet_id"]),
             "line_items": [
                 {"product_id": str(other["product_id"]), "quantity": 1, "submitted_unit_price": "9.00"}
@@ -170,7 +172,7 @@ async def test_admin_cannot_write_another_tenants_expense(admin_client):
     resp = await admin_client.post(
         "/api/v1/expenses",
         json={
-            "client_id": "cross-tenant-exp",
+            "client_id": cid("cross-tenant-exp"),
             "outlet_id": str(other["outlet_id"]),
             "amount": "10.00",
             "category": "utilities",
@@ -225,7 +227,7 @@ async def test_admin_happy_path_lists_own_outlets_sales(admin_client):
     create_resp = await admin_client.post(
         "/api/v1/sales",
         json={
-            "client_id": "own-outlet-sale-authz",
+            "client_id": cid("own-outlet-sale-authz"),
             "outlet_id": str(seed["outlet_id"]),
             "line_items": [
                 {"product_id": str(seed["product_id"]), "quantity": 1, "submitted_unit_price": "15.00"}
@@ -243,7 +245,7 @@ async def test_admin_happy_path_lists_own_outlets_sales(admin_client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body) == 1
-    assert body[0]["client_id"] == "own-outlet-sale-authz"
+    assert body[0]["client_id"] == cid("own-outlet-sale-authz")
 
 
 async def test_admin_cross_tenant_sales_404_holds_across_filter_and_order_combinations(admin_client):

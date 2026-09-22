@@ -34,6 +34,24 @@ from app.models import Outlet, Product, StockLevel, User
 # database this actually runs on in production, not just aiosqlite. Unset
 # locally by default so `pytest` with no setup still Just Works against the
 # fast in-memory default.
+
+# Deterministic UUIDs for readable test labels.
+#
+# client_id is validated as a UUID (app/schemas.py `validate_client_id`),
+# because its uniqueness is global across tenants and a short, guessable id
+# lets one tenant squat another's. That would otherwise force every fixture
+# in this suite to carry a raw UUID, and "adj-oversell" tells you what broke
+# where "f47ac10b-58cc-..." does not.
+#
+# uuid5 keeps both: the call site reads as a label, the wire value is a real
+# UUID, and it is stable across runs so a replay test still replays.
+_TEST_CLIENT_ID_NS = uuid.uuid5(uuid.NAMESPACE_URL, "ultimate-bookkeeping:tests")
+
+
+def cid(label: str) -> str:
+    """A stable UUID for `label`. Same label, same id, every run."""
+    return str(uuid.uuid5(_TEST_CLIENT_ID_NS, label))
+
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 

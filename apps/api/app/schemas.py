@@ -71,6 +71,38 @@ MAX_QUANTITY_PER_LINE_ITEM = 10_000
 MAX_LINE_ITEMS_PER_SALE = 100
 
 
+def validate_client_id(value: str) -> str:
+    """client_id must be a UUID, not merely a non-empty string.
+
+    It is the idempotency key (design.md §3.3), and its uniqueness is
+    enforced GLOBALLY — `sales.client_id` is UNIQUE across the whole table,
+    not per outlet. So client_id is one namespace shared by every tenant in
+    the system.
+
+    app/authz.py's `assert_client_id_not_another_tenants` already makes a
+    collision safe: a hit belonging to another tenant is refused with 409
+    rather than returned or silently swallowed. This closes the other half —
+    the ability to PICK a colliding id at all. Previously the field was
+    `str(min_length=1)`, so "1" was valid, and a modified client could squat
+    short ids so that another tenant's legitimate write is refused. Random
+    UUIDs make that infeasible rather than merely detected.
+
+    Accepts any UUID version, and normalizes NOTHING: the value is stored
+    and compared verbatim, so differently-cased hex are distinct ids. That
+    is correct for a key generated once and echoed back on retry
+    (packages/offline-queue never regenerates one), and changing it would
+    silently alter what counts as a replay.
+    """
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise ValueError(
+            "client_id must be a UUID — it is the idempotency key, and its "
+            "uniqueness is global across tenants (see design.md §3.3)"
+        ) from None
+    return value
+
+
 def validate_money_string(value: str) -> str:
     """Validate a wire-format money string: non-negative, <=2dp, no floats.
 
@@ -130,6 +162,7 @@ class SaleCreateRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     client_id: str = Field(min_length=1)
+    _validate_client_id = field_validator("client_id")(validate_client_id)
     outlet_id: uuid.UUID
     line_items: list[SaleLineItemIn] = Field(min_length=1, max_length=MAX_LINE_ITEMS_PER_SALE)
     # Required (code-review decision): a sale recorded with no payment method
@@ -282,6 +315,7 @@ class StockAdjustmentRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     client_id: str = Field(min_length=1)
+    _validate_client_id = field_validator("client_id")(validate_client_id)
     product_id: uuid.UUID
     outlet_id: uuid.UUID
     # `reason` is restricted to the two offline-eligible reasons this endpoint
@@ -466,6 +500,7 @@ class ExpenseCreateRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     client_id: str = Field(min_length=1)
+    _validate_client_id = field_validator("client_id")(validate_client_id)
     outlet_id: uuid.UUID
     amount: str
     category: str = Field(min_length=1)

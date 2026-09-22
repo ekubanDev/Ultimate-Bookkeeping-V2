@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.conftest import cid
+
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -7,7 +9,7 @@ from sqlalchemy import select
 from app.models import Expense
 
 
-def _expense_payload(seed, *, client_id="exp-1", amount="50.00", category="utilities", note="generator fuel"):
+def _expense_payload(seed, *, client_id=cid("exp-1"), amount="50.00", category="utilities", note="generator fuel"):
     return {
         "client_id": client_id,
         "outlet_id": str(seed["outlet_id"]),
@@ -26,12 +28,12 @@ async def test_happy_path_creates_expense(client):
     body = resp.json()
     assert body["status"] == "recorded"
     assert body["amount"] == "50.00"
-    assert body["client_id"] == "exp-1"
+    assert body["client_id"] == cid("exp-1")
     assert body["idempotent_replay"] is False
     assert "id" in body and "created_at" in body
 
     async with client.session_factory() as session:
-        expense = (await session.execute(select(Expense).where(Expense.client_id == "exp-1"))).scalar_one()
+        expense = (await session.execute(select(Expense).where(Expense.client_id == cid("exp-1")))).scalar_one()
 
     assert expense.amount == Decimal("50.00")
     assert expense.category == "utilities"
@@ -41,7 +43,7 @@ async def test_happy_path_creates_expense(client):
 
 async def test_idempotent_replay_does_not_duplicate_expense(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-replay")
+    payload = _expense_payload(seed, client_id=cid("exp-replay"))
 
     first = await client.post("/api/v1/expenses", json=payload)
     assert first.status_code == 201
@@ -57,14 +59,14 @@ async def test_idempotent_replay_does_not_duplicate_expense(client):
 
     async with client.session_factory() as session:
         expenses = (
-            (await session.execute(select(Expense).where(Expense.client_id == "exp-replay"))).scalars().all()
+            (await session.execute(select(Expense).where(Expense.client_id == cid("exp-replay")))).scalars().all()
         )
     assert len(expenses) == 1
 
 
 async def test_rejects_float_money(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-float")
+    payload = _expense_payload(seed, client_id=cid("exp-float"))
     payload["amount"] = 50.0  # float, not a string
 
     resp = await client.post("/api/v1/expenses", json=payload)
@@ -75,7 +77,7 @@ async def test_rejects_float_money(client):
 
 async def test_rejects_three_decimal_places(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-3dp", amount="50.005")
+    payload = _expense_payload(seed, client_id=cid("exp-3dp"), amount="50.005")
 
     resp = await client.post("/api/v1/expenses", json=payload)
 
@@ -85,7 +87,7 @@ async def test_rejects_three_decimal_places(client):
 
 async def test_rejects_negative_amount(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-neg", amount="-5.00")
+    payload = _expense_payload(seed, client_id=cid("exp-neg"), amount="-5.00")
 
     resp = await client.post("/api/v1/expenses", json=payload)
 
@@ -106,7 +108,7 @@ async def test_rejects_missing_client_id(client):
 
 async def test_rejects_empty_category(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-nocat", category="")
+    payload = _expense_payload(seed, client_id=cid("exp-nocat"), category="")
 
     resp = await client.post("/api/v1/expenses", json=payload)
 
@@ -123,7 +125,7 @@ OVER_CEILING = "10000000000.00"
 
 async def test_rejects_amount_above_numeric_ceiling(client):
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-over-ceiling", amount=OVER_CEILING)
+    payload = _expense_payload(seed, client_id=cid("exp-over-ceiling"), amount=OVER_CEILING)
 
     resp = await client.post("/api/v1/expenses", json=payload)
 
@@ -137,7 +139,7 @@ async def test_accepts_amount_at_exact_numeric_ceiling(client):
     test_sales.py's test_sale_near_numeric_12_2_ceiling_round_trips_on_real_db,
     run against both engines the same way the rest of this suite is."""
     seed = client.seed
-    payload = _expense_payload(seed, client_id="exp-at-ceiling", amount=MONEY_CEILING)
+    payload = _expense_payload(seed, client_id=cid("exp-at-ceiling"), amount=MONEY_CEILING)
 
     resp = await client.post("/api/v1/expenses", json=payload)
 
@@ -147,6 +149,6 @@ async def test_accepts_amount_at_exact_numeric_ceiling(client):
 
     async with client.session_factory() as session:
         expense = (
-            await session.execute(select(Expense).where(Expense.client_id == "exp-at-ceiling"))
+            await session.execute(select(Expense).where(Expense.client_id == cid("exp-at-ceiling")))
         ).scalar_one()
     assert expense.amount == Decimal(MONEY_CEILING)

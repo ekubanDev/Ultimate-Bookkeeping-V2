@@ -5,9 +5,10 @@ import uuid
 from sqlalchemy import select
 
 from app.models import Product, StockLevel, StockMovement, User
+from tests.conftest import cid
 
 
-def _adjustment_payload(seed, *, client_id="adj-1", delta=-3, reason="adjustment"):
+def _adjustment_payload(seed, *, client_id=cid("adj-1"), delta=-3, reason="adjustment"):
     return {
         "client_id": client_id,
         "product_id": str(seed["product_id"]),
@@ -34,7 +35,7 @@ async def test_happy_path_adjustment_decrements_stock(client):
     body = resp.json()
     assert body["status"] == "recorded"
     assert body["quantity"] == 7  # 10 - 3
-    assert body["client_id"] == "adj-1"
+    assert body["client_id"] == cid("adj-1")
     assert body["idempotent_replay"] is False
     assert "id" in body and "created_at" in body
 
@@ -42,7 +43,7 @@ async def test_happy_path_adjustment_decrements_stock(client):
 
     async with client.session_factory() as session:
         movements = (
-            (await session.execute(select(StockMovement).where(StockMovement.client_id == "adj-1")))
+            (await session.execute(select(StockMovement).where(StockMovement.client_id == cid("adj-1"))))
             .scalars()
             .all()
         )
@@ -67,7 +68,7 @@ async def test_restock_creates_missing_stock_levels_row(client):
         )
         await session.commit()
 
-    payload = _adjustment_payload(seed, client_id="restock-1", delta=15, reason="restock")
+    payload = _adjustment_payload(seed, client_id=cid("restock-1"), delta=15, reason="restock")
     payload["product_id"] = str(new_product_id)
 
     resp = await client.post("/api/v1/stock/adjustments", json=payload)
@@ -81,7 +82,7 @@ async def test_restock_creates_missing_stock_levels_row(client):
 
 async def test_idempotent_replay_does_not_double_apply_delta(client):
     seed = client.seed
-    payload = _adjustment_payload(seed, client_id="adj-replay", delta=-2)
+    payload = _adjustment_payload(seed, client_id=cid("adj-replay"), delta=-2)
 
     first = await client.post("/api/v1/stock/adjustments", json=payload)
     assert first.status_code == 201
@@ -99,7 +100,7 @@ async def test_idempotent_replay_does_not_double_apply_delta(client):
 
     async with client.session_factory() as session:
         movements = (
-            (await session.execute(select(StockMovement).where(StockMovement.client_id == "adj-replay")))
+            (await session.execute(select(StockMovement).where(StockMovement.client_id == cid("adj-replay"))))
             .scalars()
             .all()
         )
@@ -110,7 +111,7 @@ async def test_adjustment_replay_lookup_does_not_collide_with_sale_movements(cli
     """A sale's stock_movements rows share the sale's client_id. An
     adjustment endpoint lookup must never treat that as its own replay."""
     seed = client.seed
-    shared_client_id = "shared-id-1"
+    shared_client_id = cid("shared-id-1")
 
     sale_payload = {
         "client_id": shared_client_id,
@@ -137,7 +138,7 @@ async def test_adjustment_replay_lookup_does_not_collide_with_sale_movements(cli
 
 async def test_insufficient_stock_rolls_back_no_partial_rows(client):
     seed = client.seed
-    payload = _adjustment_payload(seed, client_id="adj-oversell", delta=-999)
+    payload = _adjustment_payload(seed, client_id=cid("adj-oversell"), delta=-999)
 
     resp = await client.post("/api/v1/stock/adjustments", json=payload)
 
@@ -151,7 +152,7 @@ async def test_insufficient_stock_rolls_back_no_partial_rows(client):
 
     async with client.session_factory() as session:
         movements = (
-            (await session.execute(select(StockMovement).where(StockMovement.client_id == "adj-oversell")))
+            (await session.execute(select(StockMovement).where(StockMovement.client_id == cid("adj-oversell"))))
             .scalars()
             .all()
         )
@@ -160,7 +161,7 @@ async def test_insufficient_stock_rolls_back_no_partial_rows(client):
 
 async def test_product_not_found(client):
     seed = client.seed
-    payload = _adjustment_payload(seed, client_id="adj-nf")
+    payload = _adjustment_payload(seed, client_id=cid("adj-nf"))
     payload["product_id"] = "00000000-0000-0000-0000-000000000000"
 
     resp = await client.post("/api/v1/stock/adjustments", json=payload)
@@ -196,10 +197,10 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
         )
         await session.commit()
 
-    cross_tenant_payload = _adjustment_payload(seed, client_id="adj-cross-tenant-product")
+    cross_tenant_payload = _adjustment_payload(seed, client_id=cid("adj-cross-tenant-product"))
     cross_tenant_payload["product_id"] = str(other_product_id)
 
-    nonexistent_payload = _adjustment_payload(seed, client_id="adj-nonexistent-product")
+    nonexistent_payload = _adjustment_payload(seed, client_id=cid("adj-nonexistent-product"))
     nonexistent_payload["product_id"] = "00000000-0000-0000-0000-000000000000"
 
     cross_tenant_resp = await client.post("/api/v1/stock/adjustments", json=cross_tenant_payload)
@@ -213,7 +214,7 @@ async def test_product_from_another_tenant_is_indistinguishable_from_nonexistent
 
 async def test_rejects_zero_delta(client):
     seed = client.seed
-    payload = _adjustment_payload(seed, client_id="adj-zero", delta=0)
+    payload = _adjustment_payload(seed, client_id=cid("adj-zero"), delta=0)
 
     resp = await client.post("/api/v1/stock/adjustments", json=payload)
 
@@ -271,7 +272,7 @@ async def test_get_stock_levels_min_stock_is_null_when_product_has_none(client):
 
     await client.post(
         "/api/v1/stock/adjustments",
-        json=_adjustment_payload(seed, client_id="adj-no-min", delta=3, reason="restock")
+        json=_adjustment_payload(seed, client_id=cid("adj-no-min"), delta=3, reason="restock")
         | {"product_id": str(new_product_id)},
     )
 
@@ -283,7 +284,7 @@ async def test_get_stock_levels_min_stock_is_null_when_product_has_none(client):
 
 async def test_get_stock_levels_reflects_adjustments(client):
     seed = client.seed
-    await client.post("/api/v1/stock/adjustments", json=_adjustment_payload(seed, client_id="adj-view", delta=4))
+    await client.post("/api/v1/stock/adjustments", json=_adjustment_payload(seed, client_id=cid("adj-view"), delta=4))
 
     resp = await client.get("/api/v1/stock/levels", params={"outlet_id": str(seed["outlet_id"])})
     assert resp.status_code == 200
