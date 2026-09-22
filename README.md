@@ -115,8 +115,8 @@ runs elsewhere. Don't "fix" this by making `API_BASE` absolute.
 ## Tests
 
 ```bash
-cd apps/api && pytest                       # 214 + 3 skipped, SQLite, no setup needed
-DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 216 + 1 skipped
+cd apps/api && pytest                       # 214 + 7 skipped, SQLite, no setup needed
+DATABASE_URL=postgresql+asyncpg://... pytest  # same suite against Postgres: 220 + 1 skipped
 
 npm run test:outlet          # 192
 npm run test:offline-queue   # 46
@@ -136,7 +136,8 @@ and Postgres physically refuses. The skip is deliberate and explained at the
 is the expected green result, not a masked failure.
 
 The skips run the other way too: `tests/test_stock_concurrency.py` (3 tests)
-is Postgres-only. SQLite's shared in-memory connection serializes concurrent
+and `tests/test_idempotency_race.py` (4 tests) are Postgres-only — hence 7
+skips on SQLite and 1 on Postgres, 221 collected either way. SQLite's shared in-memory connection serializes concurrent
 requests at the driver, so the lost-update race those tests cover cannot
 occur there and a pass would prove nothing.
 
@@ -147,6 +148,19 @@ Don't remove that override — without it, the tests asserting the Firebase
 SDK is never loaded when unconfigured will instead initialize it for real.
 
 ---
+
+## Support
+
+[`docs/support-runbook.md`](docs/support-runbook.md) — what the outlet does
+when sync fails or the app won't load, and what Tesseract does when they
+call. Part 1 is written for the shop and is meant to be printed; Part 2 is
+the diagnosis path.
+
+Every behaviour in it was checked against the code. Two limitations it
+states plainly, because they surprise people: a sale entered later is dated
+the day it is entered (there is no back-dating — `created_at` is
+server-assigned), and unsynced sales live only in that device's browser
+storage, so losing the phone with a full sync banner loses them.
 
 ## Notes and known gaps
 
