@@ -149,6 +149,19 @@ SDK is never loaded when unconfigured will instead initialize it for real.
 
 ---
 
+## Support
+
+[`docs/support-runbook.md`](docs/support-runbook.md) — what the outlet does
+when sync fails or the app won't load, and what Tesseract does when they
+call. Part 1 is written for the shop and is meant to be printed; Part 2 is
+the diagnosis path.
+
+Every behaviour in it was checked against the code. Two limitations it
+states plainly, because they surprise people: a sale entered later is dated
+the day it is entered (there is no back-dating — `created_at` is
+server-assigned), and unsynced sales live only in that device's browser
+storage, so losing the phone with a full sync banner loses them.
+
 ## Notes and known gaps
 
 - **No service worker in `npm run dev`.** Offline behaviour and caching only
