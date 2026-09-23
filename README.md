@@ -174,42 +174,14 @@ storage, so losing the phone with a full sync banner loses them.
   set in any deployed environment. If adding a key file ever seems necessary,
   that is the signal to fix the identity instead.
 - **Windows** is unverified; everything above was run on Linux.
-- **Restoring a backup has never been tested.** Nightly backups run with 7
-  retained and 7-day PITR, but no restore has been performed, so the recovery
-  time is unmeasured. Don't quote an RTO you haven't measured.
-
----
-
-## Deployment
-
-Firebase Hosting serves the outlet PWA and rewrites `/api/**` to the API on
-Cloud Run, with Postgres on Cloud SQL. The rewrite is what keeps the app and
-the API **same-origin**, which the relative `API_BASE` depends on — see the
-note in `firebase.json`. Don't split them across origins.
-
-One-time setup (idempotent, safe to re-run):
-
-```bash
-./infra/bootstrap-gcp.sh --dry-run    # inspect first
-./infra/bootstrap-gcp.sh
-```
-
-That creates the Artifact Registry repo, two least-privilege service
-accounts, a Workload Identity pool/provider bound to this repo, and an empty
-`database-url` secret — then prints the GitHub secrets and variables to set
-and the remaining manual steps.
-
-It deliberately does **not** create the Cloud SQL instance: that is the only
-resource that bills continuously from the moment it exists (~$10–25/month on
-`db-f1-micro`, no scale-to-zero), so it stays an explicit command you run
-yourself. The script prints it.
-
-Deploys are **manual** (Actions → Deploy → type `deploy`). Automatic
-deploy-on-merge is deliberately not enabled until the pipeline has been
-watched to succeed a few times.
-
-Two properties worth preserving if you change any of this:
-
+- **Disaster recovery is rehearsed, with measured numbers.** PITR is enabled
+  (7 days of logs), so the recovery point is minutes. A full restore from a
+  nightly backup to a new instance was timed at **27m 36s**, plus ~5-10m to
+  repoint the secret and redeploy — see
+  [`docs/support-runbook.md`](docs/support-runbook.md) for the commands and
+  the verification query. PITR was OFF until that drill found it: the
+  instance carried `transactionLogRetentionDays: 7`, which reads like PITR
+  and is a different setting. Check the flag, not the log retention.
 - **`alembic upgrade head` runs as a Cloud Run Job, from the image just
   built, and must succeed before the service deploys.** A migration failure
   leaves the previous revision serving against the previous schema. Running

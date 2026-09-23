@@ -187,8 +187,74 @@ till still shows the old price.
 | Data looks wrong | **Do not edit the database.** Reproduce, then fix in code |
 | Suspected price manipulation | Run the variance report; `GET /sales/{id}` shows both prices per line |
 
-### What has never been tested
+### Disaster recovery — measured, not estimated
 
-**Restoring a backup.** Backups run nightly with 7 retained and 7-day PITR,
-and no restore has ever been performed. Recovery time is therefore unknown.
-Do not promise an RTO you have not measured.
+Two recovery paths, both verified against this instance on 2026-09-23.
+
+**Point-in-time recovery.** Enabled. `pointInTimeRecoveryEnabled: True` with
+`transactionalLogStorageState: CLOUD_STORAGE`, 7 days of logs. Recovery point
+is **minutes**, not a nightly snapshot.
+
+It was off until this drill found it. The instance carried
+`transactionLogRetentionDays: 7`, which reads like PITR and is a different
+setting entirely — inert without the flag. `clone --point-in-time` was
+refused outright. Anyone auditing this later: check the flag, not the log
+retention.
+
+```bash
+gcloud sql instances clone ubk-postgres ubk-recovered \
+  --project ultimate-bookkeeping-v2 \
+  --point-in-time 2026-09-23T11:58:00Z     # UTC, within the last 7 days
+```
+
+**Nightly backup restore.** Backups at 02:00 UTC, 7 retained. This path
+restores into an instance that must already exist, so it is two operations:
+
+```bash
+gcloud sql backups list --instance ubk-postgres --project ultimate-bookkeeping-v2
+
+gcloud sql instances create ubk-recovered --project ultimate-bookkeeping-v2 \
+  --region europe-west1 --database-version POSTGRES_16 \
+  --edition ENTERPRISE --tier db-f1-micro --storage-size 10GB
+
+gcloud sql backups restore <BACKUP_ID> --restore-instance=ubk-recovered \
+  --backup-instance=ubk-postgres --project ultimate-bookkeeping-v2
+```
+
+**Measured timings** (db-f1-micro, 10GB, europe-west1, ~600 rows):
+
+| Step | Time |
+|---|---|
+| Create the empty target instance | 11m 55s |
+| Restore the backup into it | 15m 41s |
+| **Database restored and reachable** | **27m 36s** |
+| Repoint `database-url` secret + redeploy | ~5-10m |
+| **Realistic end-to-end RTO** | **~35-40 minutes** |
+
+Instance creation is over half of it. If minutes matter during a real
+incident, the PITR clone is the faster path and does not need a target
+instance to exist first.
+
+**Verified after restoring** — the restored copy matched production exactly:
+213 products, 181 stock levels, 183 movements, 35,967 units, `sum(movements)`
+equal to `stock_levels`, zero per-product mismatches, schema at
+`3defd5228372`. A restore that completes but returns wrong data is worse than
+one that fails, so check this, not just that the command exited 0:
+
+```sql
+select (select count(*) from products) as products,
+       (select coalesce(sum(quantity),0) from stock_levels) as cached,
+       (select coalesce(sum(delta),0) from stock_movements) as ledger;
+-- cached must equal ledger
+```
+
+**Then repoint the app.** The restored instance has a different connection
+name, so:
+
+1. Add a new `database-url` secret version with the new host.
+2. Update `CLOUD_SQL_CONNECTION_NAME` in GitHub secrets.
+3. Redeploy — the migration step is a no-op on an already-migrated restore.
+4. `--deletion-protection` is NOT inherited; set it on the new instance.
+
+**What is still untested:** restoring under real pressure, and the repoint
+step above. The numbers here come from a rehearsal on a quiet system.
