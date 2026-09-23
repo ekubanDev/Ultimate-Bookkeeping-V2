@@ -174,14 +174,19 @@ storage, so losing the phone with a full sync banner loses them.
   set in any deployed environment. If adding a key file ever seems necessary,
   that is the signal to fix the identity instead.
 - **Windows** is unverified; everything above was run on Linux.
-- **Disaster recovery is rehearsed, with measured numbers.** PITR is enabled
-  (7 days of logs), so the recovery point is minutes. A full restore from a
-  nightly backup to a new instance was timed at **27m 36s**, plus ~5-10m to
-  repoint the secret and redeploy — see
+- **Disaster recovery is rehearsed, with measured numbers.** Both paths were
+  run end to end and their restored data checked against production, not just
+  their exit codes: a **PITR clone in 21m 43s** and a **nightly-backup restore
+  in 27m 36s**, each plus ~5-10m to repoint the secret and redeploy. See
   [`docs/support-runbook.md`](docs/support-runbook.md) for the commands and
-  the verification query. PITR was OFF until that drill found it: the
-  instance carried `transactionLogRetentionDays: 7`, which reads like PITR
-  and is a different setting. Check the flag, not the log retention.
+  the verification query. Two things the drill corrected, both of which had
+  been asserted here without being tested:
+  - PITR was **off**. The instance carried `transactionLogRetentionDays: 7`,
+    which reads like PITR and is a different setting — inert without
+    `pointInTimeRecoveryEnabled`. Check the flag, not the log retention.
+  - Deletion protection **is** inherited by a clone. The docs said it wasn't.
+    A failed recovery attempt therefore cannot be discarded and retried until
+    the flag is cleared, which is its own operation.
 - **`alembic upgrade head` runs as a Cloud Run Job, from the image just
   built, and must succeed before the service deploys.** A migration failure
   leaves the previous revision serving against the previous schema. Running

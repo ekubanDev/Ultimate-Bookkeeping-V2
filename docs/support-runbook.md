@@ -231,9 +231,23 @@ gcloud sql backups restore <BACKUP_ID> --restore-instance=ubk-recovered \
 | Repoint `database-url` secret + redeploy | ~5-10m |
 | **Realistic end-to-end RTO** | **~35-40 minutes** |
 
-Instance creation is over half of it. If minutes matter during a real
-incident, the PITR clone is the faster path and does not need a target
-instance to exist first.
+**PITR clone, timed separately on the same day:** 12:00:07Z to 12:21:50Z,
+**21m 43s** as a single operation — no target instance to create first. Its
+data was checked with the same query below and matched production exactly:
+213 products, 181 stock levels, 183 movements, 35,967 units, 1 sale, schema
+`3defd5228372`.
+
+| Path | Time to a reachable, verified database |
+|---|---|
+| PITR clone | **21m 43s** (one command) |
+| Backup restore | **27m 36s** (two commands: create, then restore) |
+
+So the clone is faster, but by about **six minutes** — not the order of
+magnitude the shape of the commands suggests. Instance provisioning dominates
+both; the clone just folds it into one step. **Choose on recovery point, not
+on speed:** the clone can target any moment in the last 7 days, while a
+backup restore can only give you 02:00 UTC. That difference is worth a day's
+takings. The six minutes is not.
 
 **Verified after restoring** — the restored copy matched production exactly:
 213 products, 181 stock levels, 183 movements, 35,967 units, `sum(movements)`
@@ -254,7 +268,23 @@ name, so:
 1. Add a new `database-url` secret version with the new host.
 2. Update `CLOUD_SQL_CONNECTION_NAME` in GitHub secrets.
 3. Redeploy — the migration step is a no-op on an already-migrated restore.
-4. `--deletion-protection` is NOT inherited; set it on the new instance.
+4. Set `--deletion-protection` on the new instance if you created it from
+   scratch. A **clone inherits it** from the source along with the rest of the
+   source's settings, which the drill confirmed the hard way — see below.
+
+> **A clone inherits deletion protection, and that bites during recovery.**
+> `ubk-pitr-probe` was cloned from `ubk-postgres`, which has protection on, so
+> the probe came up with `deletionProtectionEnabled: True` and refused to be
+> deleted. An instance created with `gcloud sql instances create` does not get
+> it. This matters mid-incident: if a recovery attempt comes up wrong and you
+> want to throw it away and retry, the delete is refused and you must clear
+> the flag first, which is a separate operation that is itself rejected with
+> HTTP 409 while any other operation on that instance is still running.
+>
+> ```bash
+> gcloud sql instances patch <name> --no-deletion-protection --quiet
+> gcloud sql instances delete <name> --quiet
+> ```
 
 **What is still untested:** restoring under real pressure, and the repoint
 step above. The numbers here come from a rehearsal on a quiet system.
