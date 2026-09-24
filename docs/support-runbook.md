@@ -195,10 +195,35 @@ python -m scripts.variance_report \
 
 A flag means a sale was priced away from the catalog. The POS has **no price
 field**, so a cashier cannot mistype one. That leaves a stale catalog cache
-(common, benign, clears within 24h) or a modified device (rare, deliberate).
-**If no price changed recently, look at the device.**
+(common, benign — it clears on the next catalog load, see below) or a modified
+device (rare, deliberate). **If no price changed recently, look at the
+device.**
+
+A burst of flags right after a price change is expected and self-correcting:
+sales rung up between the change and the device's next catalog refresh carry
+the old price. A flag on a product whose price nobody touched is the one worth
+following up.
 
 ### Catalog changes
+
+**One product — a price change, a rename, a new min_stock.** This is a single
+API call, not an importer run. Admin token required; the outlet manager
+cannot do it.
+
+```bash
+curl -sS -X PATCH \
+  -H "Authorization: Bearer $ADMIN_ID_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"outlet_id":"<uuid>","unit_price":"48.50"}' \
+  https://ultimate-bookkeeping-v2.web.app/api/v1/products/<product_id>
+```
+
+Partial: fields you omit are left alone. Money is a NUMERIC(12,2) **string** —
+`"48.50"`, never a float. A SKU that collides returns 409 `PRODUCT_SKU_EXISTS`;
+a product belonging to another tenant returns 404, the same as one that does
+not exist. Covered by `tests/test_products_write.py`.
+
+**Whole catalog — a re-price, or first load.** That is the importer:
 
 ```bash
 python -m scripts.import_catalog <csv> \
@@ -210,9 +235,29 @@ Dry run first without `--apply`. Idempotent by SKU. Add `--restock` to bring
 stock to the CSV's quantities. Takes ~15 minutes for a full catalog — it is
 paced under the server's 30/minute write limit.
 
-A price change takes up to 24 hours to reach a device, because the service
-worker caches the product list. Tell the owner that when they ask why the
-till still shows the old price.
+**How soon the till sees it.** The service worker caches the catalog with
+Workbox **StaleWhileRevalidate**, which serves the cached copy *and* refreshes
+it in the background on the same request. `useProducts` refetches on every POS
+screen mount with no in-memory caching in front of it. So:
+
+| Catalog load after the change | What the till shows |
+|---|---|
+| 1st | old price — and the cache is refreshed in the background |
+| 2nd | **new price** |
+
+In practice: have them leave the POS screen and come back, or reload. It is one
+extra open, not a wait.
+
+> **The "24 hours" in earlier versions of this runbook was wrong.** The
+> `maxAgeSeconds: 86400` in the build is Workbox's cache *expiration* — when an
+> entry is discarded for being too old, which only bites a device that has been
+> offline that long and then has no catalog at all. It was never the staleness
+> window. Stale-while-revalidate does not hold a response back for its max age.
+>
+> Verified from `vite.config.js`, `useProducts.js` and the generated `dist/sw.js`
+> (`StaleWhileRevalidate`, `ub-products-cache`, `maxAgeSeconds:86400`). **Not yet
+> watched on a real device** — confirm on the pilot phone the first time a price
+> changes, and correct this table if it behaves differently.
 
 ### Escalation
 
