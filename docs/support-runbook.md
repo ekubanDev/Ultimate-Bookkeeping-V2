@@ -116,18 +116,17 @@ rewrite. The site loads and every API call fails. Fix: redeploy, or
 Also check alerts: three policies exist (API 5xx, Cloud SQL connections,
 uptime). **But do not read silence as good news** — see below.
 
-> **An alert that fired is informative. An alert that did not is not.**
-> From 2026-09-17 to 2026-09-24 all three policies were wired to a
-> notification channel that had never been verified. It reported
-> `enabled: true`, it was attached to every policy, and Cloud Monitoring
-> discarded every notification it was handed, because it will not deliver to
-> an unverified email channel. Channels created through the API do not
-> auto-verify the way Console-created ones do. Nothing anywhere said so; the
-> only way it surfaced was deliberately firing an alert and watching for the
-> mail.
+> **Alerting was tested end to end on 2026-09-24 and works.** A deliberately
+> triggered policy opened an incident and the email arrived. Retest after any
+> change to the channel or policies — config that has never fired is a
+> hypothesis, not monitoring.
 >
-> So before concluding from alert silence that a problem is client-side,
-> confirm the channel can actually deliver:
+> **Check the channel is VERIFIED before trusting alert silence.** Cloud
+> Monitoring does not deliver to an unverified email channel, and a channel in
+> that state still reports `enabled: true` and still attaches to policies. The
+> giveaway is that `verificationStatus` is *absent* rather than `VERIFIED` —
+> this channel was in that state until 2026-09-24. API-created channels do not
+> auto-verify the way Console-created ones do.
 >
 > ```bash
 > TOKEN=$(gcloud auth print-access-token)
@@ -137,9 +136,22 @@ uptime). **But do not read silence as good news** — see below.
 >   | grep -E 'verificationStatus|email_address'
 > ```
 >
-> Anything other than `VERIFIED` means the alerts are decorative. Re-verify
-> with `:sendVerificationCode` then `:verify` (the `x-goog-user-project`
-> header is required — without it these endpoints return an HTML 404).
+> Re-verify with `:sendVerificationCode` then `:verify`. The
+> `x-goog-user-project` header is required — without it these endpoints return
+> an HTML 404 rather than a real error.
+>
+> **How to test alerting, and how not to.** Create a temporary policy on a
+> metric you have confirmed is flowing (the uptime check works well: invert it
+> to fire on success), attach the real channel, and **wait 15-20 minutes**. A
+> 300s alignment period plus evaluation lag means nothing happens sooner.
+>
+> Do not use a short-window log-based probe. Two such tests here reported no
+> notification after ~150 seconds, once before the channel was verified and
+> once after — the second proves the method was at fault, not the pipeline.
+> Those two false negatives were briefly written up in this runbook as a
+> week-long alerting outage. There was never evidence for that. Leave the test
+> policy in place until the result is read, too: deleting it takes its
+> incident record with it, which is the evidence.
 
 ### Symptoms
 
