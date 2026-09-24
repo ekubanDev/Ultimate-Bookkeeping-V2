@@ -116,6 +116,9 @@ rewrite. The site loads and every API call fails. Fix: redeploy, or
 Also check alerts: three policies exist (API 5xx, Cloud SQL connections,
 uptime). **But do not read silence as good news** — see below.
 
+Alerts go to **two verified addresses** (both verified 2026-09-24), so one
+full mailbox or one spam rule no longer hides an outage.
+
 > **Alerting was tested end to end on 2026-09-24 and works.** A deliberately
 > triggered policy opened an incident and the email arrived. Retest after any
 > change to the channel or policies — config that has never fired is a
@@ -139,6 +142,12 @@ uptime). **But do not read silence as good news** — see below.
 > Re-verify with `:sendVerificationCode` then `:verify`. The
 > `x-goog-user-project` header is required — without it these endpoints return
 > an HTML 404 rather than a real error.
+>
+> **Every channel created through the API starts unverified.** Confirmed on
+> both channels this project has. Adding a backup destination the obvious way
+> therefore produces a dead one that reports `enabled: true` and attaches to
+> policies quite happily. Verify it, then fire a test alert and confirm the
+> mail lands, before counting it as redundancy.
 >
 > **How to test alerting, and how not to.** Create a temporary policy on a
 > metric you have confirmed is flowing (the uptime check works well: invert it
@@ -313,23 +322,32 @@ gcloud sql backups restore <BACKUP_ID> --restore-instance=ubk-recovered \
 | Repoint `database-url` secret + redeploy | ~5-10m |
 | **Realistic end-to-end RTO** | **~35-40 minutes** |
 
-**PITR clone, timed separately on the same day:** 12:00:07Z to 12:21:50Z,
-**21m 43s** as a single operation — no target instance to create first. Its
-data was checked with the same query below and matched production exactly:
-213 products, 181 stock levels, 183 movements, 35,967 units, 1 sale, schema
-`3defd5228372`.
+**PITR clone, timed twice on the same day — and the two disagree:**
+
+| Run | Window | Duration |
+|---|---|---|
+| 1 | 12:00:07Z → 12:21:50Z | **21m 43s** |
+| 2 | 17:37:51Z → 18:11:05Z | **33m 14s** |
+
+Same instance, same size, same region, 50% apart. **Plan on the slower one.**
+A single measurement of a cloud provisioning operation is an anecdote; if you
+quote one number during an incident, quote 33 minutes. Run 1's data was checked
+with the same query below and matched production exactly: 213 products, 181
+stock levels, 183 movements, 35,967 units, 1 sale, schema `3defd5228372`.
 
 | Path | Time to a reachable, verified database |
 |---|---|
-| PITR clone | **21m 43s** (one command) |
-| Backup restore | **27m 36s** (two commands: create, then restore) |
+| PITR clone | **21m 43s** and **33m 14s** on two runs (one command) |
+| Backup restore | **27m 36s**, measured once (create, then restore) |
 
-So the clone is faster, but by about **six minutes** — not the order of
-magnitude the shape of the commands suggests. Instance provisioning dominates
-both; the clone just folds it into one step. **Choose on recovery point, not
-on speed:** the clone can target any moment in the last 7 days, while a
-backup restore can only give you 02:00 UTC. That difference is worth a day's
-takings. The six minutes is not.
+An earlier version of this table claimed the clone is "about six minutes
+faster". The second run was six minutes *slower* than the restore, so that
+conclusion came from one sample and does not survive a second. The two paths
+are the same order of magnitude and provisioning dominates both.
+
+**Choose on recovery point, not on speed:** the clone can target any moment in
+the last 7 days, while a backup restore can only give you 02:00 UTC. That
+difference is worth a day's takings. The minutes are noise.
 
 **Verified after restoring** — the restored copy matched production exactly:
 213 products, 181 stock levels, 183 movements, 35,967 units, `sum(movements)`
@@ -344,12 +362,43 @@ select (select count(*) from products) as products,
 -- cached must equal ledger
 ```
 
-**Then repoint the app.** The restored instance has a different connection
-name, so:
+**Then repoint the app — rehearsed 2026-09-24, and simpler than it looks.**
+The restored instance has a different connection name. That is the *only*
+thing that changes:
 
-1. Add a new `database-url` secret version with the new host.
-2. Update `CLOUD_SQL_CONNECTION_NAME` in GitHub secrets.
-3. Redeploy — the migration step is a no-op on an already-migrated restore.
+1. Update `CLOUD_SQL_CONNECTION_NAME` in GitHub secrets, and
+   `--set-cloudsql-instances` follows it in the workflow.
+2. Redeploy. The migration step is a no-op on an already-migrated restore.
+
+> **Do NOT create a new `database-url` secret version.** An earlier version of
+> this runbook said to, "with the new host". The secret has no host in it:
+>
+> ```
+> postgresql+asyncpg://ubk_app:<password>@/ultimate_bookkeeping
+> ```
+>
+> The host comes from `CLOUD_SQL_CONNECTION_NAME` via
+> `cloud_sql_connect_args()` in `app/db.py`, which builds the
+> `/cloudsql/<connection-name>` unix socket path. A restore or clone carries
+> the same database name, user and password, so the existing secret is already
+> correct for it. Minting a new version mid-incident is a step that can only
+> go wrong.
+>
+> **Rehearsed, not reasoned:** a clone of production was deployed to a
+> throwaway Cloud Run service and the `alembic upgrade head` job run against
+> it, same image, same service account, `database-url:latest` untouched, only
+> the connection name changed. The job connected and exited 0 in 47s with no
+> `Running upgrade` lines — confirming both that the unchanged secret works
+> and that the migration really is a no-op. The throwaway service answered
+> `/api/v1/me` with 401 and an unknown path with 404, the same shape as
+> production.
+>
+> One honest limit: the database connection was proven through the migration
+> *job*, which needs no auth. The *service* was not exercised against real
+> data, because every route requires a Firebase token. The job uses the same
+> image, service account, secret and socket mount, so the path is the same —
+> but that last inch is inference, not measurement.
+
 4. Set `--deletion-protection` on the new instance if you created it from
    scratch. A **clone inherits it** from the source along with the rest of the
    source's settings, which the drill confirmed the hard way — see below.
