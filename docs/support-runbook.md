@@ -114,7 +114,32 @@ rewrite. The site loads and every API call fails. Fix: redeploy, or
 **000 / timeout** — Hosting or DNS. Check the Firebase console.
 
 Also check alerts: three policies exist (API 5xx, Cloud SQL connections,
-uptime). If none fired, the outage is probably client-side.
+uptime). **But do not read silence as good news** — see below.
+
+> **An alert that fired is informative. An alert that did not is not.**
+> From 2026-09-17 to 2026-09-24 all three policies were wired to a
+> notification channel that had never been verified. It reported
+> `enabled: true`, it was attached to every policy, and Cloud Monitoring
+> discarded every notification it was handed, because it will not deliver to
+> an unverified email channel. Channels created through the API do not
+> auto-verify the way Console-created ones do. Nothing anywhere said so; the
+> only way it surfaced was deliberately firing an alert and watching for the
+> mail.
+>
+> So before concluding from alert silence that a problem is client-side,
+> confirm the channel can actually deliver:
+>
+> ```bash
+> TOKEN=$(gcloud auth print-access-token)
+> curl -sS -H "Authorization: Bearer $TOKEN" \
+>      -H "x-goog-user-project: ultimate-bookkeeping-v2" \
+>   "https://monitoring.googleapis.com/v3/projects/ultimate-bookkeeping-v2/notificationChannels" \
+>   | grep -E 'verificationStatus|email_address'
+> ```
+>
+> Anything other than `VERIFIED` means the alerts are decorative. Re-verify
+> with `:sendVerificationCode` then `:verify` (the `x-goog-user-project`
+> header is required — without it these endpoints return an HTML 404).
 
 ### Symptoms
 
@@ -187,8 +212,104 @@ till still shows the old price.
 | Data looks wrong | **Do not edit the database.** Reproduce, then fix in code |
 | Suspected price manipulation | Run the variance report; `GET /sales/{id}` shows both prices per line |
 
-### What has never been tested
+### Disaster recovery — measured, not estimated
 
-**Restoring a backup.** Backups run nightly with 7 retained and 7-day PITR,
-and no restore has ever been performed. Recovery time is therefore unknown.
-Do not promise an RTO you have not measured.
+Two recovery paths, both verified against this instance on 2026-09-23.
+
+**Point-in-time recovery.** Enabled. `pointInTimeRecoveryEnabled: True` with
+`transactionalLogStorageState: CLOUD_STORAGE`, 7 days of logs. Recovery point
+is **minutes**, not a nightly snapshot.
+
+It was off until this drill found it. The instance carried
+`transactionLogRetentionDays: 7`, which reads like PITR and is a different
+setting entirely — inert without the flag. `clone --point-in-time` was
+refused outright. Anyone auditing this later: check the flag, not the log
+retention.
+
+```bash
+gcloud sql instances clone ubk-postgres ubk-recovered \
+  --project ultimate-bookkeeping-v2 \
+  --point-in-time 2026-09-23T11:58:00Z     # UTC, within the last 7 days
+```
+
+**Nightly backup restore.** Backups at 02:00 UTC, 7 retained. This path
+restores into an instance that must already exist, so it is two operations:
+
+```bash
+gcloud sql backups list --instance ubk-postgres --project ultimate-bookkeeping-v2
+
+gcloud sql instances create ubk-recovered --project ultimate-bookkeeping-v2 \
+  --region europe-west1 --database-version POSTGRES_16 \
+  --edition ENTERPRISE --tier db-f1-micro --storage-size 10GB
+
+gcloud sql backups restore <BACKUP_ID> --restore-instance=ubk-recovered \
+  --backup-instance=ubk-postgres --project ultimate-bookkeeping-v2
+```
+
+**Measured timings** (db-f1-micro, 10GB, europe-west1, ~600 rows):
+
+| Step | Time |
+|---|---|
+| Create the empty target instance | 11m 55s |
+| Restore the backup into it | 15m 41s |
+| **Database restored and reachable** | **27m 36s** |
+| Repoint `database-url` secret + redeploy | ~5-10m |
+| **Realistic end-to-end RTO** | **~35-40 minutes** |
+
+**PITR clone, timed separately on the same day:** 12:00:07Z to 12:21:50Z,
+**21m 43s** as a single operation — no target instance to create first. Its
+data was checked with the same query below and matched production exactly:
+213 products, 181 stock levels, 183 movements, 35,967 units, 1 sale, schema
+`3defd5228372`.
+
+| Path | Time to a reachable, verified database |
+|---|---|
+| PITR clone | **21m 43s** (one command) |
+| Backup restore | **27m 36s** (two commands: create, then restore) |
+
+So the clone is faster, but by about **six minutes** — not the order of
+magnitude the shape of the commands suggests. Instance provisioning dominates
+both; the clone just folds it into one step. **Choose on recovery point, not
+on speed:** the clone can target any moment in the last 7 days, while a
+backup restore can only give you 02:00 UTC. That difference is worth a day's
+takings. The six minutes is not.
+
+**Verified after restoring** — the restored copy matched production exactly:
+213 products, 181 stock levels, 183 movements, 35,967 units, `sum(movements)`
+equal to `stock_levels`, zero per-product mismatches, schema at
+`3defd5228372`. A restore that completes but returns wrong data is worse than
+one that fails, so check this, not just that the command exited 0:
+
+```sql
+select (select count(*) from products) as products,
+       (select coalesce(sum(quantity),0) from stock_levels) as cached,
+       (select coalesce(sum(delta),0) from stock_movements) as ledger;
+-- cached must equal ledger
+```
+
+**Then repoint the app.** The restored instance has a different connection
+name, so:
+
+1. Add a new `database-url` secret version with the new host.
+2. Update `CLOUD_SQL_CONNECTION_NAME` in GitHub secrets.
+3. Redeploy — the migration step is a no-op on an already-migrated restore.
+4. Set `--deletion-protection` on the new instance if you created it from
+   scratch. A **clone inherits it** from the source along with the rest of the
+   source's settings, which the drill confirmed the hard way — see below.
+
+> **A clone inherits deletion protection, and that bites during recovery.**
+> `ubk-pitr-probe` was cloned from `ubk-postgres`, which has protection on, so
+> the probe came up with `deletionProtectionEnabled: True` and refused to be
+> deleted. An instance created with `gcloud sql instances create` does not get
+> it. This matters mid-incident: if a recovery attempt comes up wrong and you
+> want to throw it away and retry, the delete is refused and you must clear
+> the flag first, which is a separate operation that is itself rejected with
+> HTTP 409 while any other operation on that instance is still running.
+>
+> ```bash
+> gcloud sql instances patch <name> --no-deletion-protection --quiet
+> gcloud sql instances delete <name> --quiet
+> ```
+
+**What is still untested:** restoring under real pressure, and the repoint
+step above. The numbers here come from a rehearsal on a quiet system.
