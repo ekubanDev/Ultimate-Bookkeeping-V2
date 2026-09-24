@@ -114,7 +114,32 @@ rewrite. The site loads and every API call fails. Fix: redeploy, or
 **000 / timeout** — Hosting or DNS. Check the Firebase console.
 
 Also check alerts: three policies exist (API 5xx, Cloud SQL connections,
-uptime). If none fired, the outage is probably client-side.
+uptime). **But do not read silence as good news** — see below.
+
+> **An alert that fired is informative. An alert that did not is not.**
+> From 2026-09-17 to 2026-09-24 all three policies were wired to a
+> notification channel that had never been verified. It reported
+> `enabled: true`, it was attached to every policy, and Cloud Monitoring
+> discarded every notification it was handed, because it will not deliver to
+> an unverified email channel. Channels created through the API do not
+> auto-verify the way Console-created ones do. Nothing anywhere said so; the
+> only way it surfaced was deliberately firing an alert and watching for the
+> mail.
+>
+> So before concluding from alert silence that a problem is client-side,
+> confirm the channel can actually deliver:
+>
+> ```bash
+> TOKEN=$(gcloud auth print-access-token)
+> curl -sS -H "Authorization: Bearer $TOKEN" \
+>      -H "x-goog-user-project: ultimate-bookkeeping-v2" \
+>   "https://monitoring.googleapis.com/v3/projects/ultimate-bookkeeping-v2/notificationChannels" \
+>   | grep -E 'verificationStatus|email_address'
+> ```
+>
+> Anything other than `VERIFIED` means the alerts are decorative. Re-verify
+> with `:sendVerificationCode` then `:verify` (the `x-goog-user-project`
+> header is required — without it these endpoints return an HTML 404).
 
 ### Symptoms
 
