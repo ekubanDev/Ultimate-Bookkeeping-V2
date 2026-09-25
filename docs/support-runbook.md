@@ -65,6 +65,12 @@ Tap the banner. For each item you get two choices:
   because of network or a server problem.
 - **Discard** — throw it away. Only for something that should never have been
   recorded, e.g. a sale rung up twice by mistake.
+- **Record stock and resend** — appears only when a sale was refused because
+  the stock records could not cover it. It shows exactly what it would
+  correct, e.g. *"Milo 400g — sold 5, records showed 3. Would record +2."*
+  Use it when the goods really did leave the shop and the shelf simply held
+  more than the system knew. **It writes a stock correction in your name, so
+  only use it if the stock was genuinely there.**
 
 **Retry cannot change the sale.** If the details are wrong, discard it and
 ring it up again correctly.

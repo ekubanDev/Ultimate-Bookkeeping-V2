@@ -811,6 +811,35 @@ h3 { font-size: var(--ub-fs-lg); }
   color: var(--ub-ink-soft);
 }
 
+/* The INSUFFICIENT_STOCK correction. Styled as a warning, not an error: it
+   is an action the manager may legitimately take, but it writes an inventory
+   correction in their name and should not be tapped absent-mindedly. */
+.ub-sync-resolution-screen__shortfall {
+  margin: var(--ub-s3) 0;
+  padding: var(--ub-s3);
+  background: var(--ub-warn-bg);
+  border-left: 4px solid var(--ub-warn);
+  border-radius: var(--ub-radius);
+}
+
+.ub-sync-resolution-screen__shortfall p {
+  margin: 0 0 var(--ub-s2);
+}
+
+.ub-sync-resolution-screen__shortfall-list {
+  margin: var(--ub-s2) 0;
+  padding-left: var(--ub-s5);
+}
+
+.ub-sync-resolution-screen__shortfall-list li {
+  margin-bottom: var(--ub-s2);
+}
+
+.ub-sync-resolution-screen__shortfall-note {
+  font-weight: 700;
+  color: var(--ub-warn);
+}
+
 .ub-sync-resolution-screen__actions {
   display: flex;
   flex-wrap: wrap;
