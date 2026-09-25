@@ -116,13 +116,15 @@ rewrite. The site loads and every API call fails. Fix: redeploy, or
 Also check alerts: three policies exist (API 5xx, Cloud SQL connections,
 uptime). **But do not read silence as good news** — see below.
 
-Alerts go to **two verified addresses** (both verified 2026-09-24), so one
-full mailbox or one spam rule no longer hides an outage.
+Alerts go to **two verified addresses**, and a real alert was confirmed
+arriving at *both* on 2026-09-24 — not merely configured. One full mailbox or
+one spam rule no longer hides an outage.
 
 > **Alerting was tested end to end on 2026-09-24 and works.** A deliberately
-> triggered policy opened an incident and the email arrived. Retest after any
-> change to the channel or policies — config that has never fired is a
-> hypothesis, not monitoring.
+> triggered policy opened an incident and the mail arrived at both
+> destinations — Gmail and Yahoo — so delivery is proven per channel, not just
+> for the project. Retest after any change to the channels or policies: config
+> that has never fired is a hypothesis, not monitoring.
 >
 > **Check the channel is VERIFIED before trusting alert silence.** Cloud
 > Monitoring does not deliver to an unverified email channel, and a channel in
