@@ -1,0 +1,764 @@
+/**
+ * app.css — the Outlet app's stylesheet.
+ *
+ * Targets the BEM hooks the components already carry. The markup was written
+ * with a consistent `ub-block__element` vocabulary throughout but no
+ * stylesheet was ever added (the UI plan deferred it as "a small decision,
+ * settled at implementation time" and it never was), so the deployed app
+ * rendered as unstyled HTML. Nothing caught it: the component tests query by
+ * role and text and are indifferent to whether any CSS exists.
+ *
+ * Because that vocabulary is consistent, this file styles every screen
+ * without a single component change.
+ *
+ * Layout model: one scrolling content column, a FIXED bottom nav, and on the
+ * POS screen a sticky cart above it. Content reserves space for both, so the
+ * last product tile is never trapped under the nav.
+ */
+
+@import "./tokens.css";
+
+/* ---------------------------------------------------------------- base -- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--ub-font);
+  font-size: var(--ub-fs-base);
+  line-height: 1.5;
+  color: var(--ub-ink);
+  background: var(--ub-bg);
+  /* Stops the whole page rubber-banding while a list scrolls underneath. */
+  overscroll-behavior-y: none;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 var(--ub-s3);
+  line-height: 1.25;
+}
+
+h1 { font-size: var(--ub-fs-2xl); }
+h2 { font-size: var(--ub-fs-xl); }
+h3 { font-size: var(--ub-fs-lg); }
+
+/* Visible focus everywhere. Removing it is how a keyboard or switch user
+   loses their place; this app is also used with gloves and cracked screens
+   where the hit point is not obvious. */
+:focus-visible {
+  outline: 3px solid var(--ub-info);
+  outline-offset: 2px;
+}
+
+/* Visible to a screen reader, not on screen. Used for the product-search
+   label: the placeholder alone is not an accessible name, and a visible
+   label above a sticky search field costs a row of screen on a phone. */
+.ub-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------- shell -- */
+
+.ub-app-content {
+  /* Room for the fixed nav plus any iOS home indicator. */
+  padding: var(--ub-s4) var(--ub-s4)
+    calc(var(--ub-nav-h) + var(--ub-s5) + env(safe-area-inset-bottom, 0px));
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.ub-app-splash,
+.ub-app-route-loading,
+.ub-app-message {
+  padding: var(--ub-s6) var(--ub-s4);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+.ub-app-degraded-banner {
+  padding: var(--ub-s3) var(--ub-s4);
+  background: var(--ub-warn-bg);
+  border-bottom: 2px solid var(--ub-warn);
+  color: var(--ub-warn);
+  font-weight: 600;
+}
+
+/* ----------------------------------------------------------------- nav -- */
+
+.ub-outlet-nav {
+  position: fixed;
+  inset: auto 0 0 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  background: var(--ub-navy);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  box-shadow: var(--ub-shadow-lift);
+}
+
+.ub-outlet-nav__item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--ub-nav-h);
+  padding: var(--ub-s2);
+  color: #d7d5ea;
+  text-decoration: none;
+  font-size: var(--ub-fs-base);
+  font-weight: 600;
+  /* The active tab gets a top rule in the accent colour. Reserved on every
+     tab so switching tabs doesn't shift the labels by 3px. */
+  border-top: 3px solid transparent;
+}
+
+.ub-outlet-nav__item.active,
+.ub-outlet-nav__item[aria-current="page"] {
+  color: #fff;
+  border-top-color: var(--ub-amber);
+  background: var(--ub-navy-ink);
+}
+
+/* ------------------------------------------------------------- buttons -- */
+
+.ub-button {
+  min-height: var(--ub-tap);
+  padding: var(--ub-s3) var(--ub-s5);
+  font: inherit;
+  font-weight: 600;
+  border-radius: var(--ub-radius);
+  border: 2px solid transparent;
+  cursor: pointer;
+  /* Stops a double-tap being read as a zoom gesture mid-sale. */
+  touch-action: manipulation;
+}
+
+.ub-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ub-button--primary {
+  background: var(--ub-navy);
+  color: #fff;
+}
+
+.ub-button--primary:active:not(:disabled) {
+  background: var(--ub-navy-ink);
+}
+
+.ub-button--secondary {
+  background: var(--ub-bg);
+  color: var(--ub-navy);
+  border-color: var(--ub-navy);
+}
+
+.ub-button--danger {
+  background: var(--ub-danger);
+  color: #fff;
+}
+
+.ub-button--ghost {
+  background: transparent;
+  color: var(--ub-navy);
+  border-color: var(--ub-border-soft);
+}
+
+/* -------------------------------------------------------------- inputs -- */
+
+.ub-input {
+  display: block;
+  margin-bottom: var(--ub-s4);
+}
+
+.ub-input__label {
+  display: block;
+  margin-bottom: var(--ub-s2);
+  font-weight: 600;
+  font-size: var(--ub-fs-base);
+}
+
+.ub-input input,
+.ub-input select,
+.ub-input textarea {
+  display: block;
+  width: 100%;
+  min-height: var(--ub-tap);
+  padding: var(--ub-s3);
+  /* 16px exactly: anything smaller makes iOS Safari zoom on focus. */
+  font-size: var(--ub-fs-base);
+  font-family: inherit;
+  color: var(--ub-ink);
+  background: var(--ub-bg);
+  border: 2px solid var(--ub-border);
+  border-radius: var(--ub-radius);
+}
+
+.ub-input input:focus,
+.ub-input select:focus {
+  border-color: var(--ub-info);
+}
+
+/* --------------------------------------------------------------- login -- */
+
+.ub-login-screen {
+  max-width: 24rem;
+  margin: 0 auto;
+  padding: var(--ub-s6) var(--ub-s4);
+}
+
+.ub-login-screen__error {
+  margin-bottom: var(--ub-s4);
+  padding: var(--ub-s3);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+  font-weight: 600;
+}
+
+/* ----------------------------------------------------------------- pos -- */
+
+.ub-pos-screen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ub-s4);
+}
+
+.ub-pos-screen__loading,
+.ub-pos-screen__empty {
+  padding: var(--ub-s5);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+.ub-pos-screen__error {
+  padding: var(--ub-s3);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+}
+
+/* Product search. Sticks to the top so it stays reachable while scrolling a
+   long catalog — with 200+ products, scrolling back up to search is the
+   difference between usable and not. */
+.ub-pos-screen__search {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: var(--ub-s2) 0;
+  background: var(--ub-bg);
+}
+
+.ub-pos-screen__search input {
+  width: 100%;
+  min-height: var(--ub-tap);
+  padding: var(--ub-s3);
+  font-size: var(--ub-fs-base);
+  font-family: inherit;
+  border: 2px solid var(--ub-border);
+  border-radius: var(--ub-radius);
+}
+
+.ub-pos-screen__search-count {
+  padding-top: var(--ub-s2);
+  font-size: var(--ub-fs-sm);
+  color: var(--ub-ink-soft);
+}
+
+/* -------------------------------------------------------- product grid -- */
+
+.ub-product-grid {
+  display: grid;
+  /* Two columns on a phone, more as width allows. auto-fill rather than a
+     fixed count so a tablet or landscape phone uses the space. */
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: var(--ub-s3);
+}
+
+.ub-product-grid__tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--ub-s2);
+  min-height: 5.5rem;
+  padding: var(--ub-s3);
+  text-align: left;
+  background: var(--ub-surface);
+  color: var(--ub-ink);
+  border: 2px solid var(--ub-border-soft);
+  border-radius: var(--ub-radius-lg);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ub-product-grid__tile:active {
+  background: var(--ub-surface-sunk);
+  border-color: var(--ub-navy);
+}
+
+.ub-product-grid__name {
+  font-weight: 600;
+  line-height: 1.3;
+  /* Long names ("Tuneful STW 12 inches") wrap rather than blowing out the
+     grid column. */
+  overflow-wrap: anywhere;
+}
+
+.ub-product-grid__price {
+  font-size: var(--ub-fs-lg);
+  font-weight: 700;
+  color: var(--ub-navy);
+  font-variant-numeric: tabular-nums;
+}
+
+.ub-product-grid__empty {
+  padding: var(--ub-s5);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+/* ---------------------------------------------------------------- cart -- */
+
+.ub-cart {
+  position: sticky;
+  /* Sits directly above the fixed nav. */
+  bottom: calc(var(--ub-nav-h) + env(safe-area-inset-bottom, 0px));
+  z-index: 15;
+  padding: var(--ub-s3);
+  background: var(--ub-bg);
+  border: 2px solid var(--ub-border-soft);
+  border-radius: var(--ub-radius-lg);
+  box-shadow: var(--ub-shadow-lift);
+}
+
+.ub-cart__empty {
+  padding: var(--ub-s2);
+  color: var(--ub-ink-soft);
+  text-align: center;
+}
+
+.ub-cart__list {
+  list-style: none;
+  margin: 0 0 var(--ub-s3);
+  padding: 0;
+  /* A long cart scrolls inside itself instead of pushing the total off. */
+  max-height: 11rem;
+  overflow-y: auto;
+}
+
+/* Four children in DOM order: name, stepper, price, Remove. On a phone that
+   is too much for one row, so it is two: name and price on top (price right-
+   aligned, where the eye looks for money), stepper and Remove beneath.
+   Placed explicitly rather than left to auto-flow, so adding a child later
+   cannot silently reshuffle the row. */
+.ub-cart__line {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--ub-s2) var(--ub-s3);
+  padding: var(--ub-s3) 0;
+  border-bottom: 1px solid var(--ub-border-soft);
+}
+
+.ub-cart__line > .ub-cart__line-name { grid-area: 1 / 1; }
+.ub-cart__line > .ub-cart__line-price { grid-area: 1 / 2; text-align: right; }
+.ub-cart__line > .ub-cart__line-stepper { grid-area: 2 / 1; }
+.ub-cart__line > .ub-button { grid-area: 2 / 2; }
+
+.ub-cart__line-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ub-cart__line-price {
+  font-variant-numeric: tabular-nums;
+  color: var(--ub-ink-soft);
+}
+
+.ub-cart__line-quantity {
+  min-width: 2ch;
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ub-cart__line-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--ub-s2);
+}
+
+.ub-cart__line-stepper button {
+  min-width: var(--ub-tap);
+  min-height: var(--ub-tap);
+  font-size: var(--ub-fs-lg);
+  font-weight: 700;
+  background: var(--ub-surface);
+  color: var(--ub-ink);
+  border: 2px solid var(--ub-border);
+  border-radius: var(--ub-radius);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ub-cart__total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--ub-s3);
+  padding: var(--ub-s3) 0;
+  font-size: var(--ub-fs-xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ub-cart__total > span:first-child {
+  font-size: var(--ub-fs-base);
+  font-weight: 600;
+  color: var(--ub-ink-soft);
+}
+
+/* -------------------------------------------------------------- modals -- */
+
+.ub-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgb(17 24 39 / 55%);
+  padding: var(--ub-s3);
+}
+
+.ub-modal {
+  width: 100%;
+  max-width: 32rem;
+  /* Never taller than the viewport; the body scrolls instead. */
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ub-bg);
+  border-radius: var(--ub-radius-lg);
+  box-shadow: var(--ub-shadow);
+}
+
+.ub-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ub-s3);
+  padding: var(--ub-s4);
+  border-bottom: 2px solid var(--ub-surface-sunk);
+  font-size: var(--ub-fs-lg);
+  font-weight: 700;
+}
+
+.ub-modal__close {
+  min-width: var(--ub-tap);
+  min-height: var(--ub-tap);
+  font-size: var(--ub-fs-xl);
+  line-height: 1;
+  background: transparent;
+  border: none;
+  color: var(--ub-ink-soft);
+  cursor: pointer;
+}
+
+.ub-modal__body {
+  padding: var(--ub-s4);
+  overflow-y: auto;
+}
+
+/* ------------------------------------------------------------ checkout -- */
+
+.ub-checkout-modal__total-preview {
+  padding: var(--ub-s3);
+  margin-bottom: var(--ub-s4);
+  background: var(--ub-surface);
+  border-radius: var(--ub-radius);
+  font-size: var(--ub-fs-xl);
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ub-checkout-modal__payment-method,
+.ub-checkout-modal__discount-type {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ub-s2);
+  margin-bottom: var(--ub-s4);
+}
+
+.ub-checkout-modal__discount-type-option {
+  display: flex;
+  align-items: center;
+  gap: var(--ub-s2);
+  min-height: var(--ub-tap);
+  padding: var(--ub-s2) var(--ub-s3);
+  border: 2px solid var(--ub-border-soft);
+  border-radius: var(--ub-radius);
+  cursor: pointer;
+}
+
+.ub-checkout-modal__discount-type-option:has(input:checked) {
+  border-color: var(--ub-navy);
+  background: var(--ub-surface);
+  font-weight: 600;
+}
+
+.ub-checkout-modal__error,
+.ub-checkout-modal__field-error {
+  padding: var(--ub-s2) var(--ub-s3);
+  margin-bottom: var(--ub-s3);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------- stock -- */
+
+.ub-stock-screen__loading {
+  padding: var(--ub-s5);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+.ub-stock-screen__error {
+  padding: var(--ub-s3);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+}
+
+.ub-stock-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ub-stock-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--ub-s2) var(--ub-s3);
+  min-height: var(--ub-tap);
+  padding: var(--ub-s3) 0;
+  border-bottom: 1px solid var(--ub-border-soft);
+}
+
+.ub-stock-list__name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ub-stock-list__sku {
+  grid-column: 1;
+  font-size: var(--ub-fs-sm);
+  color: var(--ub-ink-soft);
+}
+
+.ub-stock-list__qty {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-size: var(--ub-fs-xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.ub-stock-list__low-badge {
+  display: inline-block;
+  margin-left: var(--ub-s2);
+  padding: 0 var(--ub-s2);
+  background: var(--ub-warn-bg);
+  border: 1px solid var(--ub-warn);
+  border-radius: 999px;
+  color: var(--ub-warn);
+  font-size: var(--ub-fs-sm);
+  font-weight: 700;
+}
+
+.ub-stock-list__empty {
+  padding: var(--ub-s5);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+/* ------------------------------------------------------------ expenses -- */
+
+.ub-expense-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.ub-expense-form__error {
+  padding: var(--ub-s3);
+  margin-bottom: var(--ub-s3);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+  font-weight: 600;
+}
+
+.ub-expense-form__success {
+  padding: var(--ub-s3);
+  margin-bottom: var(--ub-s3);
+  background: var(--ub-success-bg);
+  border-left: 4px solid var(--ub-success);
+  color: var(--ub-success);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------- sync -- */
+
+.ub-sync-banner {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ub-s2) var(--ub-s3);
+  align-items: center;
+  padding: var(--ub-s3) var(--ub-s4);
+  background: var(--ub-info-bg);
+  border-bottom: 2px solid var(--ub-info);
+  font-weight: 600;
+}
+
+.ub-sync-banner__syncing { color: var(--ub-info); }
+
+/* Failed and identity-blocked are the two states that need a person to act,
+   so they are the two that look urgent. "Syncing" deliberately does not — it
+   is the normal state of a shop with bad signal, and the runbook tells the
+   owner it is not a problem. */
+.ub-sync-banner__failed,
+.ub-sync-banner__identity-blocked {
+  color: var(--ub-danger);
+  font-weight: 700;
+}
+
+.ub-sync-banner__variance { color: var(--ub-warn); }
+
+.ub-sync-resolution-screen__intro {
+  margin-bottom: var(--ub-s4);
+  color: var(--ub-ink-soft);
+}
+
+.ub-sync-resolution-screen__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ub-sync-resolution-screen__item {
+  padding: var(--ub-s4);
+  margin-bottom: var(--ub-s3);
+  background: var(--ub-surface);
+  border: 2px solid var(--ub-border-soft);
+  border-radius: var(--ub-radius-lg);
+}
+
+.ub-sync-resolution-screen__type {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.ub-sync-resolution-screen__code {
+  display: inline-block;
+  padding: 0 var(--ub-s2);
+  background: var(--ub-surface-sunk);
+  border-radius: var(--ub-radius);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--ub-fs-sm);
+}
+
+.ub-sync-resolution-screen__note {
+  margin: var(--ub-s2) 0;
+  color: var(--ub-ink-soft);
+}
+
+.ub-sync-resolution-screen__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ub-s3);
+  margin-top: var(--ub-s3);
+}
+
+.ub-sync-resolution-screen__error,
+.ub-sync-resolution-screen__action-error {
+  padding: var(--ub-s2) var(--ub-s3);
+  margin-top: var(--ub-s2);
+  background: var(--ub-danger-bg);
+  border-left: 4px solid var(--ub-danger);
+  color: var(--ub-danger);
+  font-weight: 600;
+}
+
+.ub-sync-resolution-screen__empty {
+  padding: var(--ub-s6) var(--ub-s4);
+  text-align: center;
+  color: var(--ub-ink-soft);
+}
+
+/* ------------------------------------------------------- update prompt -- */
+
+.ub-update-prompt {
+  position: fixed;
+  left: var(--ub-s3);
+  right: var(--ub-s3);
+  bottom: calc(var(--ub-nav-h) + var(--ub-s3) + env(safe-area-inset-bottom, 0px));
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ub-s3);
+  padding: var(--ub-s3) var(--ub-s4);
+  border-radius: var(--ub-radius-lg);
+  box-shadow: var(--ub-shadow);
+  font-weight: 600;
+}
+
+.ub-update-prompt--offline-ready {
+  background: var(--ub-success-bg);
+  border: 2px solid var(--ub-success);
+  color: var(--ub-success);
+}
+
+.ub-update-prompt--update-available {
+  background: var(--ub-info-bg);
+  border: 2px solid var(--ub-info);
+  color: var(--ub-info);
+}
+
+/* ------------------------------------------------------------- motion -- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

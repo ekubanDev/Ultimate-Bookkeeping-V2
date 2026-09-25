@@ -245,3 +245,41 @@ describe("CheckoutModal — which status blocks confirm", () => {
     expect(screen.getByRole("button", { name: /confirm sale/i })).toBeTruthy();
   });
 });
+
+describe("CheckoutModal — money display", () => {
+  // The modal showed "Subtotal: 100.00" and "Estimated total: 85.00" with no
+  // currency. Every other test here asserts the *payload*, which is the
+  // unformatted wire string and stays identical either way — so nothing
+  // covered what the cashier reads before confirming a sale.
+  it("shows the subtotal with a currency symbol", () => {
+    renderModal();
+    expect(screen.getByText(/Subtotal: ₵100\.00/)).toBeTruthy();
+  });
+
+  it("shows the estimated total with a currency symbol once a discount applies", () => {
+    renderModal();
+
+    fireEvent.change(screen.getByLabelText(/discount value \(%\)/i), {
+      target: { value: "15.00" },
+    });
+
+    expect(screen.getByText(/Estimated total: ₵85\.00/)).toBeTruthy();
+  });
+
+  it("groups thousands in the subtotal", () => {
+    renderModal({ subtotal: "1234.50" });
+    expect(screen.getByText(/Subtotal: ₵1,234\.50/)).toBeTruthy();
+  });
+
+  it("keeps the confirmed payload unformatted, symbols never reach the API", () => {
+    const { onConfirm } = renderModal({ subtotal: "1234.50" });
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm sale/i }));
+
+    const payload = onConfirm.mock.calls[0][0];
+    for (const value of Object.values(payload)) {
+      expect(String(value)).not.toContain("₵");
+      expect(String(value)).not.toContain(",");
+    }
+  });
+});

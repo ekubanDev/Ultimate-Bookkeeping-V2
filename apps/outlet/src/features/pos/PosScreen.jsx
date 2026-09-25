@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@ub/shared-ui";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import ProductGrid from "./ProductGrid.jsx";
@@ -7,6 +7,7 @@ import CheckoutModal from "./CheckoutModal.jsx";
 import { useCart } from "./useCart.js";
 import { useSubmitSale } from "./useSubmitSale.js";
 import { useProducts } from "./useProducts.js";
+import { filterProducts } from "./filterProducts.js";
 
 /**
  * PosScreen — top-level POS screen.
@@ -21,9 +22,14 @@ import { useProducts } from "./useProducts.js";
 export default function PosScreen() {
   const { profile } = useAuth();
   const [isCheckoutOpen, setCheckoutOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const cart = useCart();
   const { submitSale, status, reset: resetSubmit } = useSubmitSale();
   const { products, loading, error } = useProducts(profile?.outlet_id);
+  const visibleProducts = useMemo(
+    () => filterProducts(products, search),
+    [products, search]
+  );
 
   // Admin accounts have no outlet_id — this app is for outlet managers only
   // (the admin console at /apps/admin is where cross-outlet views live, per
@@ -96,7 +102,36 @@ export default function PosScreen() {
         </p>
       )}
       {!loading && !error && products.length > 0 && (
-        <ProductGrid products={products} onAddProduct={cart.addItem} />
+        <>
+          <div className="ub-pos-screen__search">
+            <label className="ub-visually-hidden" htmlFor="ub-product-search">
+              Search products
+            </label>
+            <input
+              id="ub-product-search"
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search products"
+              autoComplete="off"
+              // Not autoFocus: on a phone that opens the keyboard over the
+              // grid every time the POS screen mounts, which is the wrong
+              // default when most sales start by tapping a familiar product.
+            />
+            {search.trim() !== "" && (
+              <p className="ub-pos-screen__search-count" role="status">
+                {visibleProducts.length} of {products.length} products
+              </p>
+            )}
+          </div>
+          {visibleProducts.length === 0 ? (
+            <p className="ub-pos-screen__empty">
+              No products match &ldquo;{search.trim()}&rdquo;.
+            </p>
+          ) : (
+            <ProductGrid products={visibleProducts} onAddProduct={cart.addItem} />
+          )}
+        </>
       )}
       <Cart
         lineItems={cart.lineItems}
