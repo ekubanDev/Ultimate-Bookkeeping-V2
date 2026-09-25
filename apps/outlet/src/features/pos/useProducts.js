@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getProducts } from "@ub/api-client";
+import { fetchAllProducts } from "./fetchAllProducts.js";
 
 /**
  * useProducts — fetches the product catalog for one outlet.
@@ -9,9 +10,11 @@ import { getProducts } from "@ub/api-client";
  * GET call, not queued. If the device is offline the fetch will fail and
  * `error` will be set; callers can surface a plain message.
  *
- * Maps 1:1 to GET /api/v1/products (tenant-scoped server-side, ordered by
- * name). Mirrors useStockLevels.js's shape/conventions so the two read
- * hooks are consistent.
+ * Maps to GET /api/v1/products (tenant-scoped server-side, ordered by name),
+ * PAGED via fetchAllProducts — the endpoint defaults to 50 per request and
+ * caps at 200, so a single call silently truncated the catalog. Mirrors
+ * useStockLevels.js's shape/conventions so the two read hooks are
+ * consistent.
  *
  * @param {string|null|undefined} outletId
  * @returns {{ products: Array, loading: boolean, error: Error|null, refetch: () => void }}
@@ -35,7 +38,7 @@ export function useProducts(outletId) {
     setLoading(true);
     setError(null);
 
-    getProducts({ outlet_id: outletId })
+    fetchAllProducts(getProducts, outletId)
       .then((data) => {
         if (!cancelled) {
           setProducts(Array.isArray(data) ? data : []);

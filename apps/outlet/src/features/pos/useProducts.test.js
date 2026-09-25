@@ -2,6 +2,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { useProducts } from "./useProducts.js";
 
+// The hook pages through the catalog (see fetchAllProducts.js) because the
+// endpoint defaults to 50 and caps at 200 — a bare query truncated the
+// 213-product pilot catalog to a quarter of itself.
+
 const getProductsMock = vi.fn();
 vi.mock("@ub/api-client", () => ({
   getProducts: (...args) => getProductsMock(...args),
@@ -33,7 +37,11 @@ describe("useProducts", () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    expect(getProductsMock).toHaveBeenCalledWith({ outlet_id: "outlet-1" });
+    expect(getProductsMock).toHaveBeenCalledWith({
+      outlet_id: "outlet-1",
+      limit: 200,
+      offset: 0,
+    });
     expect(result.current.products).toEqual(MOCK_PRODUCTS);
     expect(result.current.error).toBeNull();
   });
@@ -76,11 +84,19 @@ describe("useProducts", () => {
     });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(getProductsMock).toHaveBeenCalledWith({ outlet_id: "outlet-1" });
+    expect(getProductsMock).toHaveBeenCalledWith({
+      outlet_id: "outlet-1",
+      limit: 200,
+      offset: 0,
+    });
 
     rerender({ id: "outlet-2" });
     await waitFor(() => expect(getProductsMock).toHaveBeenCalledTimes(2));
-    expect(getProductsMock).toHaveBeenLastCalledWith({ outlet_id: "outlet-2" });
+    expect(getProductsMock).toHaveBeenLastCalledWith({
+      outlet_id: "outlet-2",
+      limit: 200,
+      offset: 0,
+    });
   });
 
   it("refetch() triggers a new fetch without changing outletId", async () => {
