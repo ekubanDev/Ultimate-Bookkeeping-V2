@@ -398,6 +398,51 @@ h3 { font-size: var(--ub-fs-lg); }
   font-variant-numeric: tabular-nums;
 }
 
+/* Stock cue. Absent entirely when unknown (offline) — see productStock.js:
+   a blank says "we don't know", a zero would say something false. */
+.ub-product-grid__stock {
+  font-size: var(--ub-fs-sm);
+  font-weight: 600;
+  color: var(--ub-ink-soft);
+}
+
+.ub-product-grid__stock--low {
+  color: var(--ub-warn);
+}
+
+/* The two unavailable states are styled alike because the cashier's decision
+   is the same, but they are labelled differently because the cause is not. */
+.ub-product-grid__stock--out,
+.ub-product-grid__stock--not_stocked {
+  color: var(--ub-danger);
+}
+
+.ub-product-grid__tile--out,
+.ub-product-grid__tile--not_stocked {
+  border-style: dashed;
+  border-color: var(--ub-danger);
+  background: var(--ub-bg);
+}
+
+/* Confirmation before selling something the books say isn't there. */
+.ub-pos-screen__stock-warning {
+  padding: var(--ub-s4);
+  background: var(--ub-danger-bg);
+  border: 2px solid var(--ub-danger);
+  border-radius: var(--ub-radius-lg);
+}
+
+.ub-pos-screen__stock-warning p {
+  margin: 0 0 var(--ub-s4);
+  font-weight: 600;
+}
+
+.ub-pos-screen__stock-warning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ub-s3);
+}
+
 .ub-product-grid__empty {
   padding: var(--ub-s5);
   text-align: center;
