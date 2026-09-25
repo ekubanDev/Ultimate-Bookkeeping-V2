@@ -1,4 +1,4 @@
-import { Button } from "@ub/shared-ui";
+import { Button, formatMoney } from "@ub/shared-ui";
 
 /**
  * Cart — renders the current sale's line items and running total.
@@ -49,7 +49,7 @@ export default function Cart({
                   +
                 </Button>
               </span>
-              <span className="ub-cart__line-price">{item.unit_price}</span>
+              <span className="ub-cart__line-price">{formatMoney(item.unit_price)}</span>
               <Button
                 variant="secondary"
                 onClick={() => onRemoveItem?.(item.product_id)}
@@ -60,7 +60,10 @@ export default function Cart({
           ))}
         </ul>
       )}
-      <div className="ub-cart__total">Subtotal: {total}</div>
+      <div className="ub-cart__total">
+        <span>Subtotal</span>
+        <span>{formatMoney(total)}</span>
+      </div>
     </div>
   );
 }

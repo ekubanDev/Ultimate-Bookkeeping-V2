@@ -6,6 +6,8 @@
  * PosScreen) or fetching the product list (receives `products` as a prop —
  * a future useProducts hook or cached catalog owns that fetch).
  */
+import { formatMoney } from "@ub/shared-ui";
+
 export default function ProductGrid({ products = [], onAddProduct }) {
   if (products.length === 0) {
     return <p className="ub-product-grid__empty">No products loaded yet.</p>;
@@ -21,7 +23,7 @@ export default function ProductGrid({ products = [], onAddProduct }) {
           onClick={() => onAddProduct?.(product)}
         >
           <span className="ub-product-grid__name">{product.name}</span>
-          <span className="ub-product-grid__price">{product.unit_price}</span>
+          <span className="ub-product-grid__price">{formatMoney(product.unit_price)}</span>
         </button>
       ))}
     </div>

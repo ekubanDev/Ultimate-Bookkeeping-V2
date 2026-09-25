@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Modal, Button, Input } from "@ub/shared-ui";
+import { Modal, Button, Input, formatMoney } from "@ub/shared-ui";
 import { toCents, fromCents } from "./useCart.js";
 
 /** NUMERIC(12,2)-shaped money string, e.g. "0.00" or "12.50". No parseFloat — this is a format check only. */
@@ -169,7 +169,7 @@ export default function CheckoutModal({
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Checkout">
-      <p>Subtotal: {subtotal}</p>
+      <p>Subtotal: {formatMoney(subtotal)}</p>
       <label className="ub-checkout-modal__payment-method">
         Payment method
         <select
@@ -236,7 +236,7 @@ export default function CheckoutModal({
         // Estimate only — the receipt-worthy figure is the server's
         // total_amount from the POST /api/v1/sales response, not this.
         <p className="ub-checkout-modal__total-preview">
-          Estimated total: {previewTotal}
+          Estimated total: {formatMoney(previewTotal)}
         </p>
       ) : null}
 

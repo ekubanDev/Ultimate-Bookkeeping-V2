@@ -11,6 +11,7 @@
     "build:outlet": "npm run build --workspace=apps/outlet",
     "test:outlet": "npm run test --workspace=apps/outlet",
     "test:offline-queue": "npm run test --workspace=packages/offline-queue",
-    "test:api-client": "npm run test --workspace=packages/api-client"
+    "test:api-client": "npm run test --workspace=packages/api-client",
+    "test:shared-ui": "npm run test --workspace=packages/shared-ui"
   }
 }

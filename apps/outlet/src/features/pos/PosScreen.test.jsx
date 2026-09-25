@@ -321,3 +321,78 @@ describe("PosScreen — consecutive sales while offline", () => {
     await screen.findByRole("button", { name: /^checkout$/i });
   });
 });
+
+describe("PosScreen — product search", () => {
+  // The pilot catalog is 213 products rendered as a flat grid. Without search,
+  // finding one means scrolling past two hundred others with a customer
+  // waiting, so these cover the narrowing itself and the states around it.
+  const searchBox = () => screen.getByRole("searchbox", { name: /search products/i });
+
+  it("shows every product before anything is typed", () => {
+    render(<PosScreen />);
+    // Each product renders one tile button; the cart is empty so no duplicates.
+    expect(screen.getByRole("button", { name: /Milo 400g/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Rice 5kg/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Key Soap/ })).toBeTruthy();
+  });
+
+  it("narrows the grid to matching products as the cashier types", () => {
+    render(<PosScreen />);
+
+    fireEvent.change(searchBox(), { target: { value: "milo" } });
+
+    expect(screen.getByRole("button", { name: /Milo 400g/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Rice 5kg/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Key Soap/ })).toBeNull();
+  });
+
+  it("matches on SKU, not just the name", () => {
+    render(<PosScreen />);
+
+    fireEvent.change(searchBox(), { target: { value: "KEYSOAP" } });
+
+    expect(screen.getByRole("button", { name: /Key Soap/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Milo 400g/ })).toBeNull();
+  });
+
+  it("reports how many of the catalog are showing, but only while searching", () => {
+    render(<PosScreen />);
+    expect(screen.queryByText(/of 6 products/)).toBeNull();
+
+    fireEvent.change(searchBox(), { target: { value: "oil" } });
+
+    expect(screen.getByText("1 of 6 products")).toBeTruthy();
+  });
+
+  it("says so when nothing matches, instead of showing a blank grid", () => {
+    render(<PosScreen />);
+
+    fireEvent.change(searchBox(), { target: { value: "bicycle" } });
+
+    expect(screen.getByText(/No products match/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Milo 400g/ })).toBeNull();
+  });
+
+  it("restores the full grid when the query is cleared", () => {
+    render(<PosScreen />);
+
+    fireEvent.change(searchBox(), { target: { value: "milo" } });
+    expect(screen.queryByRole("button", { name: /Rice 5kg/ })).toBeNull();
+
+    fireEvent.change(searchBox(), { target: { value: "" } });
+    expect(screen.getByRole("button", { name: /Rice 5kg/ })).toBeTruthy();
+  });
+
+  it("still adds the right product to the cart after filtering", () => {
+    // The tile must carry the real product through, not a filtered copy.
+    render(<PosScreen />);
+
+    fireEvent.change(searchBox(), { target: { value: "kalyppo" } });
+    fireEvent.click(screen.getByRole("button", { name: /Kalyppo Juice/ }));
+
+    // Now in the cart: the name AND the formatted price each appear twice,
+    // once in the grid tile and once in the cart line.
+    expect(screen.getAllByText("Kalyppo Juice").length).toBeGreaterThan(1);
+    expect(screen.getAllByText("₵8.50").length).toBeGreaterThan(1);
+  });
+});
