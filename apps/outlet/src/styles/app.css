@@ -102,6 +102,74 @@ h3 { font-size: var(--ub-fs-lg); }
   font-weight: 600;
 }
 
+/* -------------------------------------------------------------- header -- */
+
+.ub-app-header {
+  /* sticky also makes this a positioned ancestor, which is what the
+     absolutely-positioned confirm panel below anchors to. */
+  position: sticky;
+  top: 0;
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ub-s3);
+  padding: var(--ub-s2) var(--ub-s4);
+  background: var(--ub-navy);
+  color: #fff;
+}
+
+.ub-app-header__identity {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ub-app-header__name {
+  font-weight: 700;
+  /* A long display name must not push the sign-out button off screen. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ub-app-header__pending {
+  font-size: var(--ub-fs-sm);
+  color: var(--ub-amber);
+  font-weight: 600;
+}
+
+/* Sign out sits on navy, so the ghost variant's dark text would vanish. */
+.ub-app-header .ub-button--ghost {
+  color: #fff;
+  border-color: rgb(255 255 255 / 45%);
+  padding: var(--ub-s2) var(--ub-s3);
+}
+
+.ub-app-header__confirm {
+  position: absolute;
+  top: 100%;
+  left: var(--ub-s3);
+  right: var(--ub-s3);
+  z-index: 35;
+  padding: var(--ub-s4);
+  background: var(--ub-bg);
+  color: var(--ub-ink);
+  border: 2px solid var(--ub-danger);
+  border-radius: var(--ub-radius-lg);
+  box-shadow: var(--ub-shadow);
+}
+
+.ub-app-header__confirm-text {
+  margin: 0 0 var(--ub-s4);
+}
+
+.ub-app-header__confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ub-s3);
+}
+
 /* ----------------------------------------------------------------- nav -- */
 
 .ub-outlet-nav {

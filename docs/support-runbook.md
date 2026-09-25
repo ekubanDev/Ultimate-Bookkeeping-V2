@@ -20,7 +20,19 @@ attention. It is the only place the app tells you about sync.
 | *(nothing)* | Everything has reached the server | Nothing |
 | **N items syncing** | Sales recorded, waiting for network | Nothing — it clears itself |
 | **N item(s) failed to sync — resolve needed** | The server refused something | Tap it, see below |
-| **Waiting for the original cashier to sign in** | Someone else recorded these; the app will not submit them under your name | Have that person sign in on this device |
+| **Waiting for the original cashier to sign in** | Someone else recorded these; the app will not submit them under your name | Tap **Sign out** at the top, then have that person sign in on this phone |
+
+### Who is signed in
+
+The bar at the top of the screen shows the name of whoever is signed in, and
+a **Sign out** button. That name matters: a sale is tied to the person who
+rang it up, so if the banner mentions "another user", the name at the top is
+who it is *not*.
+
+If anything is still waiting to sync, signing out will ask you to confirm.
+**Those sales are not deleted** — they stay on this phone and go up when that
+person signs back in. But nobody else can send them, so hand the phone over
+only when the banner is clear, unless that person is coming back.
 
 ### "N items syncing" is not a problem
 
@@ -168,7 +180,28 @@ one spam rule no longer hides an outage.
 
 **"Auth not configured"** — the deployed bundle was built without
 `VITE_FIREBASE_*`. The deploy now refuses to ship that, so it means an old
-cached bundle. Have them hard-reload or clear site data.
+cached bundle. Have them hard-reload first; only clear site data after
+checking the banner (below).
+
+> ### Never clear site data while anything is unsynced
+>
+> **Clearing site data deletes the offline queue.** That queue is where sales
+> rung up without network live, and this document says elsewhere that losing
+> it is "the one genuine data-loss path" in the system. Clearing it destroys
+> real takings that no other copy exists of — not a cache, not a session.
+>
+> **Before telling anyone to clear site data, have them read the banner:**
+>
+> | Banner shows | Safe to clear? |
+> |---|---|
+> | Nothing at all | Yes — everything has reached the server |
+> | *N items syncing* | **No.** Get them online and wait for it to clear |
+> | *N item(s) failed to sync* | **No.** Resolve each item on the Sync screen first |
+> | *Waiting for the original cashier* | **No.** That person must sign in and let it drain |
+>
+> A hard reload is always safe and fixes a stale bundle on its own. Clearing
+> site data is a separate, destructive step — treat it as a last resort and
+> only on an empty banner.
 
 **Signed in, but "ask your admin"** (`USER_NOT_PROVISIONED`) — the Firebase
 account has no `users` row, or its uid is not a UUID. See the PROVISIONING
@@ -274,7 +307,7 @@ extra open, not a wait.
 
 | Situation | Action |
 |---|---|
-| One device misbehaving | Hard reload, then clear site data |
+| One device misbehaving | Hard reload. **Check the sync banner before clearing site data** — see the warning below |
 | Everyone affected, API 401 | Client-side; check the deploy |
 | Everyone affected, API 403/timeout | Server-side; check Cloud Run and alerts |
 | Data looks wrong | **Do not edit the database.** Reproduce, then fix in code |
