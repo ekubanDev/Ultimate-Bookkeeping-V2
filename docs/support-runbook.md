@@ -304,10 +304,23 @@ extra open, not a wait.
 > offline that long and then has no catalog at all. It was never the staleness
 > window. Stale-while-revalidate does not hold a response back for its max age.
 >
-> Verified from `vite.config.js`, `useProducts.js` and the generated `dist/sw.js`
-> (`StaleWhileRevalidate`, `ub-products-cache`, `maxAgeSeconds:86400`). **Not yet
-> watched on a real device** — confirm on the pilot phone the first time a price
-> changes, and correct this table if it behaves differently.
+> **Observed, not reasoned** (2026-09-26). Driving a real Chrome against the
+> real production build, with the catalog price changed upstream between
+> fetches:
+>
+> | Fetch | Returned |
+> |---|---|
+> | 1st — warms the cache | old price |
+> | *price changed upstream* | |
+> | 2nd | **old** price (served stale, revalidated in the background) |
+> | 3rd | **new** price |
+>
+> The 2nd fetch returning the stale price is worth as much as the 3rd: it
+> proves the products route really is cached, so the anchored-regex bug that
+> once made it match nothing has not come back.
+>
+> Reproduce with `node apps/outlet/scripts/verify-sw-revalidate.mjs` after a
+> build. Re-run it after any change to the Workbox config or `useProducts`.
 
 ### Escalation
 

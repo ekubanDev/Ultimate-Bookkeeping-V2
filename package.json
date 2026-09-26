@@ -13,5 +13,8 @@
     "test:offline-queue": "npm run test --workspace=packages/offline-queue",
     "test:api-client": "npm run test --workspace=packages/api-client",
     "test:shared-ui": "npm run test --workspace=packages/shared-ui"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
   }
 }
