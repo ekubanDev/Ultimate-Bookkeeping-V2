@@ -8,7 +8,14 @@
  */
 import { formatMoney } from "@ub/shared-ui";
 
-export default function ProductGrid({ products = [], onAddProduct }) {
+import { describeStock, STOCK_UNKNOWN } from "./productStock.js";
+
+export default function ProductGrid({
+  products = [],
+  onAddProduct,
+  stockByProduct = null,
+  hasStockData = false,
+}) {
   if (products.length === 0) {
     return <p className="ub-product-grid__empty">No products loaded yet.</p>;
   }
@@ -16,16 +23,39 @@ export default function ProductGrid({ products = [], onAddProduct }) {
   return (
     <div className="ub-product-grid">
       {products.map((product) => (
-        <button
+        <ProductTile
           key={product.id}
-          type="button"
-          className="ub-product-grid__tile"
-          onClick={() => onAddProduct?.(product)}
-        >
-          <span className="ub-product-grid__name">{product.name}</span>
-          <span className="ub-product-grid__price">{formatMoney(product.unit_price)}</span>
-        </button>
+          product={product}
+          stock={describeStock(product, stockByProduct, hasStockData)}
+          onAddProduct={onAddProduct}
+        />
       ))}
     </div>
+  );
+}
+
+/**
+ * One tile. Split out so the stock cue lives in one place rather than being
+ * threaded through the map body.
+ *
+ * The stock line is omitted entirely when state is `unknown` — offline, that
+ * is every product, and an empty space says "we don't know" far better than a
+ * zero would.
+ */
+function ProductTile({ product, stock, onAddProduct }) {
+  return (
+    <button
+      type="button"
+      className={`ub-product-grid__tile ub-product-grid__tile--${stock.state}`}
+      onClick={() => onAddProduct?.(product)}
+    >
+      <span className="ub-product-grid__name">{product.name}</span>
+      {stock.state !== STOCK_UNKNOWN && stock.label && (
+        <span className={`ub-product-grid__stock ub-product-grid__stock--${stock.state}`}>
+          {stock.label}
+        </span>
+      )}
+      <span className="ub-product-grid__price">{formatMoney(product.unit_price)}</span>
+    </button>
   );
 }

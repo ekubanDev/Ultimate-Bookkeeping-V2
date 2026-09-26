@@ -45,9 +45,19 @@ vi.mock("./useProducts.js", () => ({
   useProducts: (...args) => useProductsMock(...args),
 }));
 
+// PosScreen now also reads live stock so it can warn before a cashier rings
+// up something the books say is not there. Mocked so the warning path is
+// actually exercised — without this the real hook's fetch simply fails, every
+// product reads as `unknown`, and the tests pass by never reaching the code.
+let mockStock = { levels: [], loading: false, error: null, refetch: () => {} };
+vi.mock("../stock/useStockLevels.js", () => ({
+  useStockLevels: () => mockStock,
+}));
+
 beforeEach(() => {
   enqueueMock.mockReset();
   enqueueMock.mockResolvedValue({ state: "queued", client_id: "mock-entry" });
+  mockStock = { levels: [], loading: false, error: null, refetch: () => {} };
   useProductsMock.mockReset();
   useProductsMock.mockReturnValue({
     products: MOCK_PRODUCTS,
@@ -394,5 +404,96 @@ describe("PosScreen — product search", () => {
     // once in the grid tile and once in the cart line.
     expect(screen.getAllByText("Kalyppo Juice").length).toBeGreaterThan(1);
     expect(screen.getAllByText("₵8.50").length).toBeGreaterThan(1);
+  });
+});
+
+describe("PosScreen — selling something that is not in stock", () => {
+  // The failure this prevents: the cashier rings up a sold-out item, the cart
+  // clears, the customer leaves, and hours later the sale fails to sync with
+  // INSUFFICIENT_STOCK (retryable: false) — money taken, sale unrecordable.
+  const STOCKED = [
+    { product_id: "prod-demo-milo", product_name: "Milo 400g", quantity: 12, sku: "MILO400" },
+    { product_id: "prod-demo-rice", product_name: "Rice 5kg", quantity: 0, sku: "RICE5" },
+    // prod-demo-water is deliberately absent: never stocked at this outlet.
+  ];
+
+  it("adds a well-stocked product straight to the cart, no friction", () => {
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Milo 400g/ }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getAllByText("Milo 400g").length).toBeGreaterThan(1);
+  });
+
+  it("warns before adding a sold-out product, and does not add it yet", () => {
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/ }));
+
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog.textContent).toMatch(/sold out/i);
+    expect(dialog.textContent).toMatch(/will not sync/i);
+    // Still only the grid tile — nothing in the cart.
+    expect(screen.getAllByText("Rice 5kg")).toHaveLength(1);
+  });
+
+  it("warns differently for a product never stocked here", () => {
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Sachet Water/ }));
+
+    expect(screen.getByRole("alertdialog").textContent).toMatch(/never been stocked/i);
+  });
+
+  it("sells anyway when the cashier confirms — warn, never block", () => {
+    // The shop may genuinely have stock the books do not know about. Refusing
+    // real money on a stale count is the worse failure.
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/ }));
+    fireEvent.click(screen.getByRole("button", { name: /sell anyway/i }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getAllByText("Rice 5kg").length).toBeGreaterThan(1);
+  });
+
+  it("does not add the item when the warning is cancelled", () => {
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.getAllByText("Rice 5kg")).toHaveLength(1);
+  });
+
+  it("shows remaining counts on the tiles when stock is known", () => {
+    mockStock = { levels: STOCKED, loading: false, error: null, refetch: () => {} };
+    render(<PosScreen />);
+
+    expect(screen.getByText("12 left")).toBeTruthy();
+    expect(screen.getByText("Sold out")).toBeTruthy();
+    // Four of the six mock products have no level row, so this is plural.
+    expect(screen.getAllByText("Not stocked")).toHaveLength(4);
+  });
+
+  it("says NOTHING about stock when offline, and never warns", () => {
+    // The whole point of not caching stock: offline we have no number, so we
+    // show no number and get out of the cashier's way.
+    mockStock = { levels: [], loading: false, error: new Error("offline"), refetch: () => {} };
+    render(<PosScreen />);
+
+    expect(screen.queryByText(/left$/)).toBeNull();
+    expect(screen.queryByText("Sold out")).toBeNull();
+    expect(screen.queryByText("Not stocked")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Rice 5kg/ }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 });

@@ -4,6 +4,7 @@ import { onReconnect, pruneStaleEntries, reconcileStaleSyncing } from "@ub/offli
 import { useAuth } from "./auth/AuthContext.jsx";
 import LoginScreen from "./auth/LoginScreen.jsx";
 import OutletNav from "./navigation/OutletNav.jsx";
+import AppHeader from "./navigation/AppHeader.jsx";
 import PosScreen from "./features/pos/PosScreen.jsx";
 import SyncBanner from "./features/sync-status/SyncBanner.jsx";
 import UpdatePrompt from "./pwa/UpdatePrompt.jsx";
@@ -162,6 +163,7 @@ export default function App() {
           {error}
         </div>
       )}
+      <AppHeader />
       <SyncBanner />
       <main className="ub-app-content">
         <Suspense fallback={<p className="ub-app-route-loading">Loading…</p>}>

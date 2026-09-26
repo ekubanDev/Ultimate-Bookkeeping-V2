@@ -8,6 +8,13 @@ import { useCart } from "./useCart.js";
 import { useSubmitSale } from "./useSubmitSale.js";
 import { useProducts } from "./useProducts.js";
 import { filterProducts } from "./filterProducts.js";
+import { useStockLevels } from "../stock/useStockLevels.js";
+import {
+  indexStockLevels,
+  describeStock,
+  shouldWarnBeforeSelling,
+  warningFor,
+} from "./productStock.js";
 
 /**
  * PosScreen — top-level POS screen.
@@ -31,6 +38,20 @@ export default function PosScreen() {
     [products, search]
   );
 
+  // Stock is fetched LIVE and never cached (the service worker routes
+  // /stock/levels NetworkOnly on purpose). Offline this fails, `levels` stays
+  // empty and every product reads as `unknown` — which is exactly right: the
+  // POS then behaves as it did before stock existed here, rather than showing
+  // a confidently wrong number. See the runbook: "a wrong stock number is
+  // worse than no number".
+  const { levels, error: stockError } = useStockLevels(profile?.outlet_id);
+  const hasStockData = !stockError && Array.isArray(levels) && levels.length > 0;
+  const stockByProduct = useMemo(() => indexStockLevels(levels), [levels]);
+
+  // Set when the cashier taps something sold out or never stocked; cleared by
+  // confirming or cancelling. Holds the product so confirming can still add it.
+  const [pendingProduct, setPendingProduct] = useState(null);
+
   // Admin accounts have no outlet_id — this app is for outlet managers only
   // (the admin console at /apps/admin is where cross-outlet views live, per
   // CLAUDE.md's scope boundary). Surface a plain notice rather than ever
@@ -43,6 +64,19 @@ export default function PosScreen() {
       </section>
     );
   }
+
+  // Warn, never block. A stale or missing count must not refuse real money —
+  // the shop may well have stock the books do not know about. The point is
+  // that the cashier decides knowingly, instead of discovering hours later
+  // that the sale could not sync.
+  const handleAddProduct = (product) => {
+    const stock = describeStock(product, stockByProduct, hasStockData);
+    if (shouldWarnBeforeSelling(stock.state)) {
+      setPendingProduct({ product, message: warningFor(stock.state, product.name) });
+      return;
+    }
+    cart.addItem(product);
+  };
 
   const handleConfirm = async ({ paymentMethod, discountType, discountValue, taxAmount }) => {
     try {
@@ -129,9 +163,37 @@ export default function PosScreen() {
               No products match &ldquo;{search.trim()}&rdquo;.
             </p>
           ) : (
-            <ProductGrid products={visibleProducts} onAddProduct={cart.addItem} />
+            <ProductGrid
+              products={visibleProducts}
+              onAddProduct={handleAddProduct}
+              stockByProduct={stockByProduct}
+              hasStockData={hasStockData}
+            />
           )}
         </>
+      )}
+      {pendingProduct && (
+        <div
+          className="ub-pos-screen__stock-warning"
+          role="alertdialog"
+          aria-label="Confirm selling an item that is not in stock"
+        >
+          <p>{pendingProduct.message}</p>
+          <div className="ub-pos-screen__stock-warning-actions">
+            <Button
+              variant="danger"
+              onClick={() => {
+                cart.addItem(pendingProduct.product);
+                setPendingProduct(null);
+              }}
+            >
+              Sell anyway
+            </Button>
+            <Button variant="secondary" onClick={() => setPendingProduct(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
       )}
       <Cart
         lineItems={cart.lineItems}
