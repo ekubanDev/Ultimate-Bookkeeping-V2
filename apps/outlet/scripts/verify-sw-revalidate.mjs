@@ -30,13 +30,18 @@
  *   node apps/outlet/scripts/verify-sw-revalidate.mjs
  *
  * Requires a built dist/ (npm run build:outlet) and Chrome installed.
+ *
+ * Uses playwright-CORE deliberately: it drives the Chrome already on the
+ * machine via `channel: "chrome"` and has no postinstall browser download,
+ * so it costs CI nothing on `npm ci`. The full `playwright` package would
+ * pull ~100s of MB of browsers this script never touches.
  */
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium } from "playwright";
+import { chromium } from "playwright-core";
 
 const step = (m) => { console.log(`[${new Date().toISOString().slice(11,19)}] ${m}`); };
 
